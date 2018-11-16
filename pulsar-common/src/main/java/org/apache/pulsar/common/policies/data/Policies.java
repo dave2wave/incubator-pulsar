@@ -59,6 +59,10 @@ public class Policies {
 
     public long compaction_threshold = 0;
     public long offload_threshold = -1;
+    public Long offload_deletion_lag_ms = null;
+
+    public SchemaAutoUpdateCompatibilityStrategy schema_auto_update_compatibility_strategy =
+        SchemaAutoUpdateCompatibilityStrategy.Full;
 
     @Override
     public boolean equals(Object obj) {
@@ -80,7 +84,9 @@ public class Policies {
                     && max_consumers_per_topic == other.max_consumers_per_topic
                     && max_consumers_per_subscription == other.max_consumers_per_subscription
                     && compaction_threshold == other.compaction_threshold
-                    && offload_threshold == other.offload_threshold;
+                    && offload_threshold == other.offload_threshold
+                    && offload_deletion_lag_ms == other.offload_deletion_lag_ms
+                    && schema_auto_update_compatibility_strategy == other.schema_auto_update_compatibility_strategy;
         }
 
         return false;
@@ -112,6 +118,8 @@ public class Policies {
                 .add("max_consumers_per_topic", max_consumers_per_topic)
                 .add("max_consumers_per_subscription", max_consumers_per_topic)
                 .add("compaction_threshold", compaction_threshold)
-                .add("offload_threshold", offload_threshold).toString();
+                .add("offload_threshold", offload_threshold)
+                .add("offload_deletion_lag_ms", offload_deletion_lag_ms)
+                .add("schema_auto_update_compatibility_strategy", schema_auto_update_compatibility_strategy).toString();
     }
 }

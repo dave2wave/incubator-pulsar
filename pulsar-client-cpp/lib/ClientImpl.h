@@ -60,8 +60,13 @@ class ClientImpl : public boost::enable_shared_from_this<ClientImpl> {
     void subscribeAsync(const std::vector<std::string>& topics, const std::string& consumerName,
                         const ConsumerConfiguration& conf, SubscribeCallback callback);
 
+    void subscribeWithRegexAsync(const std::string& regexPattern, const std::string& consumerName,
+                                 const ConsumerConfiguration& conf, SubscribeCallback callback);
+
     void createReaderAsync(const std::string& topic, const MessageId& startMessageId,
                            const ReaderConfiguration& conf, ReaderCallback callback);
+
+    void getPartitionsForTopicAsync(const std::string& topic, GetPartitionsCallback callback);
 
     Future<Result, ClientConnectionWeakPtr> getConnection(const std::string& topic);
     void handleLookup(Result result, LookupDataResultPtr data,
@@ -82,6 +87,7 @@ class ClientImpl : public boost::enable_shared_from_this<ClientImpl> {
     ExecutorServiceProviderPtr getIOExecutorProvider();
     ExecutorServiceProviderPtr getListenerExecutorProvider();
     ExecutorServiceProviderPtr getPartitionListenerExecutorProvider();
+    LookupServicePtr getLookup();
     friend class PulsarFriend;
 
    private:
@@ -97,6 +103,9 @@ class ClientImpl : public boost::enable_shared_from_this<ClientImpl> {
                                     TopicNamePtr topicName, MessageId startMessageId,
                                     ReaderConfiguration conf, ReaderCallback callback);
 
+    void handleGetPartitions(const Result result, const LookupDataResultPtr partitionMetadata,
+                             TopicNamePtr topicName, GetPartitionsCallback callback);
+
     void handleProducerCreated(Result result, ProducerImplBaseWeakPtr producerWeakPtr,
                                CreateProducerCallback callback, ProducerImplBasePtr producer);
     void handleConsumerCreated(Result result, ConsumerImplBaseWeakPtr consumerWeakPtr,
@@ -105,6 +114,10 @@ class ClientImpl : public boost::enable_shared_from_this<ClientImpl> {
     typedef boost::shared_ptr<int> SharedInt;
 
     void handleClose(Result result, SharedInt remaining, ResultCallback callback);
+
+    void createPatternMultiTopicsConsumer(const Result result, const NamespaceTopicsPtr topics,
+                                          const std::string& regexPattern, const std::string& consumerName,
+                                          const ConsumerConfiguration& conf, SubscribeCallback callback);
 
     enum State
     {

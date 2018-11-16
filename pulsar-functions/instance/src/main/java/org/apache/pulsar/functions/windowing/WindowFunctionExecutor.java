@@ -34,8 +34,7 @@ import org.apache.pulsar.functions.api.Context;
 import org.apache.pulsar.functions.api.Function;
 import org.apache.pulsar.functions.api.Record;
 import org.apache.pulsar.functions.utils.Reflections;
-import org.apache.pulsar.functions.utils.WindowConfig;
-import org.apache.pulsar.functions.utils.validation.ValidatorImpls;
+import org.apache.pulsar.common.functions.WindowConfig;
 import org.apache.pulsar.functions.windowing.evictors.CountEvictionPolicy;
 import org.apache.pulsar.functions.windowing.evictors.TimeEvictionPolicy;
 import org.apache.pulsar.functions.windowing.evictors.WatermarkCountEvictionPolicy;
@@ -55,9 +54,6 @@ public class WindowFunctionExecutor<I, O> implements Function<I, O> {
     private WindowManager<I> windowManager;
     private TimestampExtractor<I> timestampExtractor;
     protected transient WaterMarkEventGenerator<I> waterMarkEventGenerator;
-
-    protected static final long DEFAULT_MAX_LAG_MS = 0; // no lag
-    protected static final long DEFAULT_WATERMARK_EVENT_INTERVAL_MS = 1000; // 1s
 
     protected java.util.function.Function<Collection<I>, O> windowFunction;
 
@@ -98,9 +94,6 @@ public class WindowFunctionExecutor<I, O> implements Function<I, O> {
                 (new Gson().toJson(context.getUserConfigValue(WindowConfig.WINDOW_CONFIG_KEY).get())),
                 WindowConfig.class);
 
-
-        WindowUtils.inferDefaultConfigs(windowConfig);
-        ValidatorImpls.WindowConfigValidator.validateWindowConfig(windowConfig);
         return windowConfig;
     }
 
@@ -239,7 +232,7 @@ public class WindowFunctionExecutor<I, O> implements Function<I, O> {
             throw new RuntimeException(e);
         }
         if (output != null) {
-            context.publish(context.getOutputTopic(), output, context.getOutputSerdeClassName());
+            context.publish(context.getOutputTopic(), output, context.getOutputSchemaType());
         }
     }
 
@@ -288,7 +281,7 @@ public class WindowFunctionExecutor<I, O> implements Function<I, O> {
                 this.windowManager.add(input, ts, record);
             } else {
                 if (this.windowConfig.getLateDataTopic() != null) {
-                    context.publish(this.windowConfig.getLateDataTopic(), input, context.getOutputSerdeClassName());
+                    context.publish(this.windowConfig.getLateDataTopic(), input);
                 } else {
                     log.info(String.format(
                             "Received a late tuple %s with ts %d. This will not be " + "processed"

@@ -4,7 +4,7 @@ title: The Pulsar Python client
 sidebar_label: Python
 ---
 
-The Pulsar Python client library is a wrapper over the existing [C++ client library](client-libraries-cpp.md) and exposes all of the [same features](/api/cpp). You can find the code in the [`python` subdirectory](https://github.com/apache/incubator-pulsar/tree/master/pulsar-client-cpp/python) of the C++ client code.
+The Pulsar Python client library is a wrapper over the existing [C++ client library](client-libraries-cpp.md) and exposes all of the [same features](/api/cpp). You can find the code in the [`python` subdirectory](https://github.com/apache/pulsar/tree/master/pulsar-client-cpp/python) of the C++ client code.
 
 ## Installation
 
@@ -15,15 +15,15 @@ You can install the [`pulsar-client`](https://pypi.python.org/pypi/pulsar-client
 To install the `pulsar-client` library as a pre-built package using the [pip](https://pip.pypa.io/en/stable/) package manager:
 
 ```shell
-$ pip install pulsar-client --upgrade
+$ pip install pulsar-client=={{pulsar:version_number}}
 ```
 
 Installation via PyPi is available for the following Python versions:
 
 Platform | Supported Python versions
 :--------|:-------------------------
-MacOS 10.12 (Sierra) and 10.13 (High Sierra) | 2.7, 3.6
-Linux | 2.7, 3.3, 3.4, 3.5, 3.6
+MacOS <br /> 10.11 (El Capitan) &mdash; 10.12 (Sierra) &mdash; 10.13 (High Sierra) | 2.7, 3.7
+Linux | 2.7, 3.3, 3.4, 3.5, 3.6, 3.7
 
 ### Installing from source
 
@@ -39,7 +39,7 @@ $ sudo python setup.py install
 
 ## API Reference
 
-The complete Python API reference is available at [api/python]({{site.baseUrl}}/api/python).
+The complete Python API reference is available at [api/python](/api/python).
 
 ## Examples
 
@@ -79,7 +79,7 @@ client.close()
 
 ### Reader interface example
 
-You can use the Pulsar Python API to use the Pulsar [reader interface](getting-started-concepts-and-architecture.md#reader-interface). Here's an example:
+You can use the Pulsar Python API to use the Pulsar [reader interface](concepts-clients.md#reader-interface). Here's an example:
 
 ```python
 # MessageId taken from a previously fetched message

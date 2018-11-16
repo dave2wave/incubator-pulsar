@@ -81,6 +81,13 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder serviceUrl(String serviceUrl);
 
     /**
+     * Configure the service URL provider for Pulsar service
+     * @param serviceUrlProvider
+     * @return
+     */
+    ClientBuilder serviceUrlProvider(ServiceUrlProvider serviceUrlProvider);
+
+    /**
      * Set the authentication provider to use in the Pulsar client instance.
      * <p>
      * Example:
@@ -173,7 +180,7 @@ public interface ClientBuilder extends Cloneable {
      * Set the operation timeout <i>(default: 30 seconds)</i>
      * <p>
      * Producer-create, subscribe and unsubscribe operations will be retried until this interval, after which the
-     * operation will be maked as failed
+     * operation will be marked as failed
      *
      * @param operationTimeout
      *            operation timeout
@@ -222,10 +229,13 @@ public interface ClientBuilder extends Cloneable {
     ClientBuilder enableTcpNoDelay(boolean enableTcpNoDelay);
 
     /**
-     * Configure whether to use TLS encryption on the connection <i>(default: false)</i>
+     * Configure whether to use TLS encryption on the connection
+     * <i>(default: true if serviceUrl starts with "pulsar+ssl://", false otherwise)</i>
      *
      * @param enableTls
+     * @deprecated use "pulsar+ssl://" in serviceUrl to enable
      */
+    @Deprecated
     ClientBuilder enableTls(boolean enableTls);
 
     /**

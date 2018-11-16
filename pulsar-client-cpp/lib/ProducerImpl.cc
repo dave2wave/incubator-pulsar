@@ -127,7 +127,8 @@ void ProducerImpl::connectionOpened(const ClientConnectionPtr& cnx) {
     ClientImplPtr client = client_.lock();
     int requestId = client->newRequestId();
 
-    SharedBuffer cmd = Commands::newProducer(topic_, producerId_, producerName_, requestId);
+    SharedBuffer cmd =
+        Commands::newProducer(topic_, producerId_, producerName_, requestId, conf_.getProperties());
     cnx->sendRequestWithId(cmd, requestId)
         .addListener(boost::bind(&ProducerImpl::handleCreateProducer, shared_from_this(), cnx, _1, _2));
 }
@@ -281,6 +282,13 @@ void ProducerImpl::statsCallBackHandler(Result res, const Message& msg, SendCall
     producerStatsBasePtr_->messageReceived(res, publishTime);
     if (callback) {
         callback(res, msg);
+    }
+}
+
+void ProducerImpl::triggerFlush() {
+    if (batchMessageContainer) {
+        Lock lock(mutex_);
+        batchMessageContainer->sendMessage();
     }
 }
 

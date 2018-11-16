@@ -21,6 +21,7 @@ package org.apache.pulsar.client.admin;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.pulsar.client.admin.PulsarAdminException.ConflictException;
 import org.apache.pulsar.client.admin.PulsarAdminException.NotAuthorizedException;
@@ -33,6 +34,7 @@ import org.apache.pulsar.common.policies.data.DispatchRate;
 import org.apache.pulsar.common.policies.data.PersistencePolicies;
 import org.apache.pulsar.common.policies.data.Policies;
 import org.apache.pulsar.common.policies.data.RetentionPolicies;
+import org.apache.pulsar.common.policies.data.SchemaAutoUpdateCompatibilityStrategy;
 import org.apache.pulsar.common.policies.data.SubscriptionAuthMode;
 
 /**
@@ -1212,4 +1214,112 @@ public interface Namespaces {
      *             Unexpected error
      */
     void setOffloadThreshold(String namespace, long compactionThreshold) throws PulsarAdminException;
+
+    /**
+     * Get the offload deletion lag for a namespace, in milliseconds.
+     * The number of milliseconds to wait before deleting a ledger segment which has been offloaded from
+     * the Pulsar cluster's local storage (i.e. BookKeeper).
+     *
+     * If the offload deletion lag has not been set for the namespace, the method returns 'null'
+     * and the namespace will use the configured default of the pulsar broker.
+     *
+     * A negative value disables deletion of the local ledger completely, though it will still be deleted
+     * if it exceeds the topics retention policy, along with the offloaded copy.
+     *
+     * <p>
+     * Response example:
+     *
+     * <pre>
+     * <code>3600000</code>
+     * </pre>
+     *
+     * @param namespace
+     *            Namespace name
+     * @return the offload deletion lag for the namespace in milliseconds, or null if not set
+     *
+     * @throws NotAuthorizedException
+     *             Don't have admin permission
+     * @throws NotFoundException
+     *             Namespace does not exist
+     * @throws PulsarAdminException
+     *             Unexpected error
+     */
+    Long getOffloadDeleteLagMs(String namespace) throws PulsarAdminException;
+
+    /**
+     * Set the offload deletion lag for a namespace.
+     *
+     * The offload deletion lag is the amount of time to wait after offloading a ledger segment to long term storage,
+     * before deleting its copy stored on the Pulsar cluster's local storage (i.e. BookKeeper).
+     *
+     * A negative value disables deletion of the local ledger completely, though it will still be deleted
+     * if it exceeds the topics retention policy, along with the offloaded copy.
+     *
+     * @param namespace
+     *            Namespace name
+     * @param lag the duration to wait before deleting the local copy
+     * @param unit the timeunit of the duration
+     *
+     * @throws NotAuthorizedException
+     *             Don't have admin permission
+     * @throws NotFoundException
+     *             Namespace does not exist
+     * @throws PulsarAdminException
+     *             Unexpected error
+     */
+    void setOffloadDeleteLag(String namespace, long lag, TimeUnit unit) throws PulsarAdminException;
+
+    /**
+     * Clear the offload deletion lag for a namespace.
+     *
+     * The namespace will fall back to using the configured default of the pulsar broker.
+     *
+     * @throws NotAuthorizedException
+     *             Don't have admin permission
+     * @throws NotFoundException
+     *             Namespace does not exist
+     * @throws PulsarAdminException
+     *             Unexpected error
+     */
+    void clearOffloadDeleteLag(String namespace) throws PulsarAdminException;
+
+    /**
+     * Get the strategy used to check the a new schema provided by a producer is compatible with the current schema
+     * before it is installed.
+     *
+     * <p>If this is
+     * {@link org.apache.pulsar.common.policies.data.SchemaAutoUpdateCompatibilityStrategy#AutoUpdateDisabled},
+     * then all new schemas provided via the producer are rejected, and schemas must be updated through the REST api.
+     *
+     * @param namespace The namespace in whose policy we are interested
+     * @return the strategy used to check compatibility
+     * @throws NotAuthorizedException
+     *             Don't have admin permission
+     * @throws NotFoundException
+     *             Namespace does not exist
+     * @throws PulsarAdminException
+     *             Unexpected error
+     */
+    SchemaAutoUpdateCompatibilityStrategy getSchemaAutoUpdateCompatibilityStrategy(String namespace)
+            throws PulsarAdminException;
+
+    /**
+     * Set the strategy used to check the a new schema provided by a producer is compatible with the current schema
+     * before it is installed.
+     *
+     * <p>To disable all new schema updates through the producer, set this to
+     * {@link org.apache.pulsar.common.policies.data.SchemaAutoUpdateCompatibilityStrategy#AutoUpdateDisabled}.
+     *
+     * @param namespace The namespace in whose policy should be set
+     * @param autoUpdate true if connecting producers can automatically update the schema, false otherwise
+     * @throws NotAuthorizedException
+     *             Don't have admin permission
+     * @throws NotFoundException
+     *             Namespace does not exist
+     * @throws PulsarAdminException
+     *             Unexpected error
+     */
+    void setSchemaAutoUpdateCompatibilityStrategy(String namespace,
+                                                  SchemaAutoUpdateCompatibilityStrategy strategy)
+            throws PulsarAdminException;
 }

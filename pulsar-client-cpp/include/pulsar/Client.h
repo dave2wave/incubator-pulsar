@@ -34,6 +34,7 @@ namespace pulsar {
 typedef boost::function<void(Result, Producer)> CreateProducerCallback;
 typedef boost::function<void(Result, Consumer)> SubscribeCallback;
 typedef boost::function<void(Result, Reader)> ReaderCallback;
+typedef boost::function<void(Result, const std::vector<std::string>&)> GetPartitionsCallback;
 typedef boost::function<void(Result)> CloseCallback;
 
 class ClientImpl;
@@ -99,6 +100,9 @@ class Client {
     void subscribeAsync(const std::string& topic, const std::string& consumerName,
                         const ConsumerConfiguration& conf, SubscribeCallback callback);
 
+    /**
+     * subscribe for multiple topics under the same namespace.
+     */
     Result subscribe(const std::vector<std::string>& topics, const std::string& subscriptionName,
                      Consumer& consumer);
     Result subscribe(const std::vector<std::string>& topics, const std::string& subscriptionName,
@@ -107,6 +111,19 @@ class Client {
                         SubscribeCallback callback);
     void subscribeAsync(const std::vector<std::string>& topics, const std::string& subscriptionName,
                         const ConsumerConfiguration& conf, SubscribeCallback callback);
+
+    /**
+     * subscribe for multiple topics, which match given regexPattern, under the same namespace.
+     */
+    Result subscribeWithRegex(const std::string& regexPattern, const std::string& consumerName,
+                              Consumer& consumer);
+    Result subscribeWithRegex(const std::string& regexPattern, const std::string& consumerName,
+                              const ConsumerConfiguration& conf, Consumer& consumer);
+
+    void subscribeWithRegexAsync(const std::string& regexPattern, const std::string& consumerName,
+                                 SubscribeCallback callback);
+    void subscribeWithRegexAsync(const std::string& regexPattern, const std::string& consumerName,
+                                 const ConsumerConfiguration& conf, SubscribeCallback callback);
 
     /**
      * Create a topic reader with given {@code ReaderConfiguration} for reading messages from the specified
@@ -142,6 +159,38 @@ class Client {
 
     void createReaderAsync(const std::string& topic, const MessageId& startMessageId,
                            const ReaderConfiguration& conf, ReaderCallback callback);
+
+    /**
+     * Get the list of partitions for a given topic.
+     *
+     * If the topic is partitioned, this will return a list of partition names. If the topic is not
+     * partitioned, the returned list will contain the topic name itself.
+     *
+     * This can be used to discover the partitions and create Reader, Consumer or Producer
+     * instances directly on a particular partition.
+     *
+     * @param topic
+     *            the topic name
+     * @since 2.3.0
+     */
+    Result getPartitionsForTopic(const std::string& topic, std::vector<std::string>& partitions);
+
+    /**
+     * Get the list of partitions for a given topic in asynchronous mode.
+     *
+     * If the topic is partitioned, this will return a list of partition names. If the topic is not
+     * partitioned, the returned list will contain the topic name itself.
+     *
+     * This can be used to discover the partitions and create Reader, Consumer or Producer
+     * instances directly on a particular partition.
+     *
+     * @param topic
+     *            the topic name
+     * @param callback
+     *            the callback that will be invoked when the list of partitions is available
+     * @since 2.3.0
+     */
+    void getPartitionsForTopicAsync(const std::string& topic, GetPartitionsCallback callback);
 
     /**
      *

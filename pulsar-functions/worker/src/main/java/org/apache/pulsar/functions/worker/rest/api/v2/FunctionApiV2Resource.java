@@ -20,11 +20,13 @@ package org.apache.pulsar.functions.worker.rest.api.v2;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.functions.worker.rest.FunctionApiResource;
+import org.apache.pulsar.functions.worker.rest.api.FunctionsImpl;
 import org.glassfish.jersey.media.multipart.FormDataContentDisposition;
 import org.glassfish.jersey.media.multipart.FormDataParam;
 import org.apache.pulsar.common.io.ConnectorDefinition;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.util.List;
 
 import javax.ws.rs.Consumes;
@@ -34,18 +36,13 @@ import javax.ws.rs.POST;
 import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
-import org.apache.pulsar.functions.worker.WorkerInfo;
-import org.apache.pulsar.functions.worker.rest.FunctionApiResource;
-import org.glassfish.jersey.media.multipart.FormDataContentDisposition;
-import org.glassfish.jersey.media.multipart.FormDataParam;
-
 import io.swagger.annotations.ApiOperation;
-import lombok.extern.slf4j.Slf4j;
+import io.swagger.annotations.ApiResponse;
+import io.swagger.annotations.ApiResponses;
 
 @Slf4j
 @Path("/functions")
@@ -60,10 +57,11 @@ public class FunctionApiV2Resource extends FunctionApiResource {
                                      final @FormDataParam("data") InputStream uploadedInputStream,
                                      final @FormDataParam("data") FormDataContentDisposition fileDetail,
                                      final @FormDataParam("url") String functionPkgUrl,
-                                     final @FormDataParam("functionDetails") String functionDetailsJson) {
+                                     final @FormDataParam("functionDetails") String functionDetailsJson,
+                                     final @FormDataParam("functionConfig") String functionConfigJson) {
 
-        return functions.registerFunction(
-            tenant, namespace, functionName, uploadedInputStream, fileDetail, functionPkgUrl, functionDetailsJson);
+        return functions.registerFunction(tenant, namespace, functionName, uploadedInputStream, fileDetail,
+                functionPkgUrl, functionDetailsJson, functionConfigJson, FunctionsImpl.FUNCTION, clientAppId());
 
     }
 
@@ -76,10 +74,11 @@ public class FunctionApiV2Resource extends FunctionApiResource {
                                    final @FormDataParam("data") InputStream uploadedInputStream,
                                    final @FormDataParam("data") FormDataContentDisposition fileDetail,
                                    final @FormDataParam("url") String functionPkgUrl,
-                                   final @FormDataParam("functionDetails") String functionDetailsJson) {
+                                   final @FormDataParam("functionDetails") String functionDetailsJson,
+                                   final @FormDataParam("functionConfig") String functionConfigJson) {
 
-        return functions.updateFunction(
-            tenant, namespace, functionName, uploadedInputStream, fileDetail, functionPkgUrl, functionDetailsJson);
+        return functions.updateFunction(tenant, namespace, functionName, uploadedInputStream, fileDetail,
+                functionPkgUrl, functionDetailsJson, functionConfigJson, FunctionsImpl.FUNCTION, clientAppId());
 
     }
 
@@ -87,10 +86,8 @@ public class FunctionApiV2Resource extends FunctionApiResource {
     @DELETE
     @Path("/{tenant}/{namespace}/{functionName}")
     public Response deregisterFunction(final @PathParam("tenant") String tenant,
-                                       final @PathParam("namespace") String namespace,
-                                       final @PathParam("functionName") String functionName) {
-        return functions.deregisterFunction(
-            tenant, namespace, functionName);
+            final @PathParam("namespace") String namespace, final @PathParam("functionName") String functionName) {
+        return functions.deregisterFunction(tenant, namespace, functionName, FunctionsImpl.FUNCTION, clientAppId());
     }
 
     @GET
@@ -100,7 +97,7 @@ public class FunctionApiV2Resource extends FunctionApiResource {
                                     final @PathParam("functionName") String functionName)
             throws IOException {
         return functions.getFunctionInfo(
-            tenant, namespace, functionName);
+            tenant, namespace, functionName, FunctionsImpl.FUNCTION);
     }
 
     @GET
@@ -110,7 +107,7 @@ public class FunctionApiV2Resource extends FunctionApiResource {
                                               final @PathParam("functionName") String functionName,
                                               final @PathParam("instanceId") String instanceId) throws IOException {
         return functions.getFunctionInstanceStatus(
-            tenant, namespace, functionName, instanceId);
+            tenant, namespace, functionName, FunctionsImpl.FUNCTION, instanceId, uri.getRequestUri());
     }
 
     @GET
@@ -119,7 +116,7 @@ public class FunctionApiV2Resource extends FunctionApiResource {
                                       final @PathParam("namespace") String namespace,
                                       final @PathParam("functionName") String functionName) throws IOException {
         return functions.getFunctionStatus(
-            tenant, namespace, functionName);
+            tenant, namespace, functionName, FunctionsImpl.FUNCTION, uri.getRequestUri());
     }
 
     @GET
@@ -127,20 +124,8 @@ public class FunctionApiV2Resource extends FunctionApiResource {
     public Response listFunctions(final @PathParam("tenant") String tenant,
                                   final @PathParam("namespace") String namespace) {
         return functions.listFunctions(
-            tenant, namespace);
+            tenant, namespace, FunctionsImpl.FUNCTION);
 
-    }
-
-    @GET
-    @Path("/cluster")
-    public Response getCluster() {
-        return functions.getCluster();
-    }
-
-    @GET
-    @Path("/assignments")
-    public Response getAssignments() {
-        return functions.getAssignments();
     }
 
     @POST
@@ -153,6 +138,56 @@ public class FunctionApiV2Resource extends FunctionApiResource {
                                     final @FormDataParam("dataStream") InputStream uploadedInputStream,
                                     final @FormDataParam("topic") String topic) {
         return functions.triggerFunction(tenant, namespace, functionName, input, uploadedInputStream, topic);
+    }
+
+    @POST
+    @ApiOperation(value = "Restart function instance", response = Void.class)
+    @ApiResponses(value = { @ApiResponse(code = 400, message = "Invalid request"),
+            @ApiResponse(code = 404, message = "The function does not exist"),
+            @ApiResponse(code = 500, message = "Internal server error") })
+    @Path("/{tenant}/{namespace}/{functionName}/{instanceId}/restart")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response restartFunction(final @PathParam("tenant") String tenant,
+            final @PathParam("namespace") String namespace, final @PathParam("functionName") String functionName,
+            final @PathParam("instanceId") String instanceId) {
+        return functions.restartFunctionInstance(tenant, namespace, functionName, FunctionsImpl.FUNCTION, instanceId, this.uri.getRequestUri());
+    }
+
+    @POST
+    @ApiOperation(value = "Restart all function instances", response = Void.class)
+    @ApiResponses(value = { @ApiResponse(code = 400, message = "Invalid request"),
+            @ApiResponse(code = 404, message = "The function does not exist"),
+            @ApiResponse(code = 500, message = "Internal server error") })
+    @Path("/{tenant}/{namespace}/{functionName}/restart")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response restartFunction(final @PathParam("tenant") String tenant,
+            final @PathParam("namespace") String namespace, final @PathParam("functionName") String functionName) {
+        return functions.restartFunctionInstances(tenant, namespace, functionName, FunctionsImpl.FUNCTION);
+    }
+
+    @POST
+    @ApiOperation(value = "Stop function instance", response = Void.class)
+    @ApiResponses(value = { @ApiResponse(code = 400, message = "Invalid request"),
+            @ApiResponse(code = 404, message = "The function does not exist"),
+            @ApiResponse(code = 500, message = "Internal server error") })
+    @Path("/{tenant}/{namespace}/{functionName}/{instanceId}/stop")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response stopFunction(final @PathParam("tenant") String tenant,
+            final @PathParam("namespace") String namespace, final @PathParam("functionName") String functionName,
+            final @PathParam("instanceId") String instanceId) {
+        return functions.stopFunctionInstance(tenant, namespace, functionName, FunctionsImpl.FUNCTION, instanceId, this.uri.getRequestUri());
+    }
+
+    @POST
+    @ApiOperation(value = "Stop all function instances", response = Void.class)
+    @ApiResponses(value = { @ApiResponse(code = 400, message = "Invalid request"),
+            @ApiResponse(code = 404, message = "The function does not exist"),
+            @ApiResponse(code = 500, message = "Internal server error") })
+    @Path("/{tenant}/{namespace}/{functionName}/stop")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response stopFunction(final @PathParam("tenant") String tenant,
+            final @PathParam("namespace") String namespace, final @PathParam("functionName") String functionName) {
+        return functions.stopFunctionInstances(tenant, namespace, functionName, FunctionsImpl.FUNCTION);
     }
 
     @POST
@@ -174,14 +209,14 @@ public class FunctionApiV2Resource extends FunctionApiResource {
     public List<ConnectorDefinition> getConnectorsList() throws IOException {
         return functions.getListOfConnectors();
     }
-    
+
     @GET
-    @Path("/workers")
-    @ApiOperation(value = "Get all current member workers.")
-    @Produces(MediaType.APPLICATION_JSON)
-    @Consumes(MediaType.APPLICATION_JSON)
-    public List<WorkerInfo> getWorkers() {
-        return functions.getWorkers();
+    @Path("/{tenant}/{namespace}/{functionName}/state/{key}")
+    public Response getFunctionState(final @PathParam("tenant") String tenant,
+                                      final @PathParam("namespace") String namespace,
+                                      final @PathParam("functionName") String functionName,
+                                     final @PathParam("key") String key) throws IOException {
+        return functions.getFunctionState(
+            tenant, namespace, functionName, key);
     }
-    
 }

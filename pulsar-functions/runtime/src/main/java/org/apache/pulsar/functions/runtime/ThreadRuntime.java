@@ -21,6 +21,7 @@ package org.apache.pulsar.functions.runtime;
 
 import java.util.concurrent.CompletableFuture;
 
+import io.prometheus.client.CollectorRegistry;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.api.PulsarClient;
@@ -28,6 +29,7 @@ import org.apache.pulsar.functions.instance.InstanceConfig;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.InstanceCommunication;
 import org.apache.pulsar.functions.proto.InstanceCommunication.FunctionStatus;
+import org.apache.pulsar.functions.secretsprovider.SecretsProvider;
 import org.apache.pulsar.functions.utils.functioncache.FunctionCacheManager;
 import org.apache.pulsar.functions.instance.JavaInstanceRunnable;
 import org.apache.pulsar.functions.utils.FunctionDetailsUtils;
@@ -51,17 +53,29 @@ class ThreadRuntime implements Runtime {
                   ThreadGroup threadGroup,
                   String jarFile,
                   PulsarClient pulsarClient,
-                  String stateStorageServiceUrl) {
+                  String stateStorageServiceUrl,
+                  SecretsProvider secretsProvider,
+                  CollectorRegistry collectorRegistry) {
         this.instanceConfig = instanceConfig;
         if (instanceConfig.getFunctionDetails().getRuntime() != Function.FunctionDetails.Runtime.JAVA) {
             throw new RuntimeException("Thread Container only supports Java Runtime");
         }
+
+        // if collector registry is not set, create one for this thread.
+        // since each thread / instance will needs its own collector registry for metrics collection
+        CollectorRegistry instanceCollectorRegistry = collectorRegistry;
+        if (instanceCollectorRegistry == null) {
+            instanceCollectorRegistry = new CollectorRegistry();
+        }
+
         this.javaInstanceRunnable = new JavaInstanceRunnable(
             instanceConfig,
             fnCache,
             jarFile,
             pulsarClient,
-            stateStorageServiceUrl);
+            stateStorageServiceUrl,
+            secretsProvider,
+            instanceCollectorRegistry);
         this.threadGroup = threadGroup;
     }
 
@@ -72,7 +86,9 @@ class ThreadRuntime implements Runtime {
     public void start() {
         log.info("ThreadContainer starting function with instance config {}", instanceConfig);
         this.fnThread = new Thread(threadGroup, javaInstanceRunnable,
-                FunctionDetailsUtils.getFullyQualifiedName(instanceConfig.getFunctionDetails()));
+                String.format("%s-%s",
+                        FunctionDetailsUtils.getFullyQualifiedName(instanceConfig.getFunctionDetails()),
+                        instanceConfig.getInstanceId()));
         this.fnThread.start();
     }
 
@@ -97,24 +113,21 @@ class ThreadRuntime implements Runtime {
     }
 
     @Override
-    public CompletableFuture<FunctionStatus> getFunctionStatus() {
+    public CompletableFuture<FunctionStatus> getFunctionStatus(int instanceId) {
         CompletableFuture<FunctionStatus> statsFuture = new CompletableFuture<>();
         if (!isAlive()) {
             FunctionStatus.Builder functionStatusBuilder = FunctionStatus.newBuilder();
             functionStatusBuilder.setRunning(false);
-            functionStatusBuilder.setFailureException(getDeathException().getMessage());
+            Throwable ex = getDeathException();
+            if (ex != null && ex.getMessage() != null) {
+                functionStatusBuilder.setFailureException(ex.getMessage());
+            }
             statsFuture.complete(functionStatusBuilder.build());
             return statsFuture;
         }
         FunctionStatus.Builder functionStatusBuilder = javaInstanceRunnable.getFunctionStatus();
         functionStatusBuilder.setRunning(true);
-        getMetrics().handle((metrics, e) -> {
-            if (e == null) {
-                functionStatusBuilder.setMetrics(metrics);
-            }
-            statsFuture.complete(functionStatusBuilder.build());
-            return null;
-        });
+        statsFuture.complete(functionStatusBuilder.build());
         return statsFuture;
     }
 

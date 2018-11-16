@@ -348,10 +348,15 @@ public class ManagedCursorImpl implements ManagedCursor {
         if (!ledger.ledgerExists(position.getLedgerId())) {
             Long nextExistingLedger = ledger.getNextValidLedger(position.getLedgerId());
             if (nextExistingLedger == null) {
-                log.info("[{}-{}] Couldn't find next next valid ledger for recovery {}", ledger.getName(), name,
+                log.info("[{}] [{}] Couldn't find next next valid ledger for recovery {}", ledger.getName(), name,
                         position);
             }
             position = nextExistingLedger != null ? PositionImpl.get(nextExistingLedger, -1) : position;
+        }
+        if (position.compareTo(ledger.getLastPosition()) > 0) {
+            log.warn("[{}] [{}] Current position {} is ahead of last position {}", ledger.getName(), name, position,
+                    ledger.getLastPosition());
+            position = PositionImpl.get(ledger.getLastPosition());
         }
         log.info("[{}] Cursor {} recovered to position {}", ledger.getName(), name, position);
 
@@ -462,7 +467,7 @@ public class ManagedCursorImpl implements ManagedCursor {
             }
         }, null);
 
-        counter.await();
+        counter.await(ledger.getConfig().getMetadataOperationsTimeoutSeconds(), TimeUnit.SECONDS);
 
         if (result.exception != null) {
             throw result.exception;
@@ -647,7 +652,15 @@ public class ManagedCursorImpl implements ManagedCursor {
 
     @Override
     public long getNumberOfEntries() {
-        return getNumberOfEntries(Range.closedOpen(readPosition, ledger.getLastPosition().getNext()));
+        if (readPosition.compareTo(ledger.getLastPosition().getNext()) > 0) {
+            if (log.isDebugEnabled()) {
+                log.debug("[{}] [{}] Read position {} is ahead of last position {}. There are no entries to read",
+                        ledger.getName(), name, readPosition, ledger.getLastPosition());
+            }
+            return 0;
+        } else {
+            return getNumberOfEntries(Range.closedOpen(readPosition, ledger.getLastPosition().getNext()));
+        }
     }
 
     @Override
@@ -687,6 +700,11 @@ public class ManagedCursorImpl implements ManagedCursor {
 
     @Override
     public Position findNewestMatching(Predicate<Entry> condition) throws InterruptedException, ManagedLedgerException {
+        return findNewestMatching(FindPositionConstraint.SearchActiveEntries, condition);
+    }
+
+    @Override
+    public Position findNewestMatching(FindPositionConstraint constraint, Predicate<Entry> condition) throws InterruptedException, ManagedLedgerException {
         final CountDownLatch counter = new CountDownLatch(1);
         class Result {
             ManagedLedgerException exception = null;
@@ -694,7 +712,7 @@ public class ManagedCursorImpl implements ManagedCursor {
         }
 
         final Result result = new Result();
-        asyncFindNewestMatching(FindPositionConstraint.SearchActiveEntries, condition, new FindEntryCallback() {
+        asyncFindNewestMatching(constraint, condition, new FindEntryCallback() {
             @Override
             public void findEntryComplete(Position position, Object ctx) {
                 result.position = position;
@@ -1969,68 +1987,73 @@ public class ManagedCursorImpl implements ManagedCursor {
     void createNewMetadataLedger(final VoidCallback callback) {
         ledger.mbean.startCursorLedgerCreateOp();
 
-        bookkeeper.asyncCreateLedger(config.getMetadataEnsemblesize(), config.getMetadataWriteQuorumSize(),
-                config.getMetadataAckQuorumSize(), digestType, config.getPassword(), (rc, lh, ctx) -> {
-                    ledger.getExecutor().execute(safeRun(() -> {
-                        ledger.mbean.endCursorLedgerCreateOp();
-                        if (rc != BKException.Code.OK) {
-                            log.warn("[{}] Error creating ledger for cursor {}: {}", ledger.getName(), name,
-                                    BKException.getMessage(rc));
-                            callback.operationFailed(new ManagedLedgerException(BKException.getMessage(rc)));
-                            return;
-                        }
+        ledger.asyncCreateLedger(bookkeeper, config, digestType, (rc, lh, ctx) -> {
 
+            if (ledger.checkAndCompleteLedgerOpTask(rc, lh, ctx)) {
+                return;
+            }
+
+            ledger.getExecutor().execute(safeRun(() -> {
+                ledger.mbean.endCursorLedgerCreateOp();
+                if (rc != BKException.Code.OK) {
+                    log.warn("[{}] Error creating ledger for cursor {}: {}", ledger.getName(), name,
+                            BKException.getMessage(rc));
+                    callback.operationFailed(new ManagedLedgerException(BKException.getMessage(rc)));
+                    return;
+                }
+
+                if (log.isDebugEnabled()) {
+                    log.debug("[{}] Created ledger {} for cursor {}", ledger.getName(), lh.getId(), name);
+                }
+                // Created the ledger, now write the last position
+                // content
+                MarkDeleteEntry mdEntry = lastMarkDeleteEntry;
+                persistPositionToLedger(lh, mdEntry, new VoidCallback() {
+                    @Override
+                    public void operationComplete() {
                         if (log.isDebugEnabled()) {
-                            log.debug("[{}] Created ledger {} for cursor {}", ledger.getName(), lh.getId(), name);
+                            log.debug("[{}] Persisted position {} for cursor {}", ledger.getName(),
+                                    mdEntry.newPosition, name);
                         }
-                        // Created the ledger, now write the last position
-                        // content
-                        MarkDeleteEntry mdEntry = lastMarkDeleteEntry;
-                        persistPositionToLedger(lh, mdEntry, new VoidCallback() {
+                        switchToNewLedger(lh, new VoidCallback() {
                             @Override
                             public void operationComplete() {
-                                if (log.isDebugEnabled()) {
-                                    log.debug("[{}] Persisted position {} for cursor {}", ledger.getName(),
-                                            mdEntry.newPosition, name);
-                                }
-                                switchToNewLedger(lh, new VoidCallback() {
-                                    @Override
-                                    public void operationComplete() {
-                                        callback.operationComplete();
-                                    }
-
-                                    @Override
-                                    public void operationFailed(ManagedLedgerException exception) {
-                                        // it means it failed to switch the newly created ledger so, it should be
-                                        // deleted to prevent leak
-                                        bookkeeper.asyncDeleteLedger(lh.getId(), (int rc, Object ctx) -> {
-                                            if (rc != BKException.Code.OK) {
-                                                log.warn("[{}] Failed to delete orphan ledger {}", ledger.getName(),
-                                                        lh.getId());
-                                            }
-                                        }, null);
-                                        callback.operationFailed(exception);
-                                    }
-                                });
+                                callback.operationComplete();
                             }
 
                             @Override
                             public void operationFailed(ManagedLedgerException exception) {
-                                log.warn("[{}] Failed to persist position {} for cursor {}", ledger.getName(),
-                                        mdEntry.newPosition, name);
-
-                                ledger.mbean.startCursorLedgerDeleteOp();
-                                bookkeeper.asyncDeleteLedger(lh.getId(), new DeleteCallback() {
-                                    @Override
-                                    public void deleteComplete(int rc, Object ctx) {
-                                        ledger.mbean.endCursorLedgerDeleteOp();
+                                // it means it failed to switch the newly created ledger so, it should be
+                                // deleted to prevent leak
+                                bookkeeper.asyncDeleteLedger(lh.getId(), (int rc, Object ctx) -> {
+                                    if (rc != BKException.Code.OK) {
+                                        log.warn("[{}] Failed to delete orphan ledger {}", ledger.getName(),
+                                                lh.getId());
                                     }
                                 }, null);
                                 callback.operationFailed(exception);
                             }
                         });
-                    }));
-                }, null, Collections.emptyMap());
+                    }
+
+                    @Override
+                    public void operationFailed(ManagedLedgerException exception) {
+                        log.warn("[{}] Failed to persist position {} for cursor {}", ledger.getName(),
+                                mdEntry.newPosition, name);
+
+                        ledger.mbean.startCursorLedgerDeleteOp();
+                        bookkeeper.asyncDeleteLedger(lh.getId(), new DeleteCallback() {
+                            @Override
+                            public void deleteComplete(int rc, Object ctx) {
+                                ledger.mbean.endCursorLedgerDeleteOp();
+                            }
+                        }, null);
+                        callback.operationFailed(exception);
+                    }
+                });
+            }));
+        }, Collections.emptyMap());
+       
     }
 
     private List<LongProperty> buildPropertiesMap(Map<String, Long> properties) {

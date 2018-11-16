@@ -561,6 +561,8 @@ public class ModularLoadManagerImpl implements ModularLoadManager, ZooKeeperCach
         if (StringUtils.isNotEmpty(brokerZnodePath)) {
             try {
                 pulsar.getZkClient().delete(brokerZnodePath, -1);
+            } catch (org.apache.zookeeper.KeeperException.NoNodeException e) {
+                throw new PulsarServerException.NotFoundException(e);
             } catch (Exception e) {
                 throw new PulsarServerException(e);
             }
@@ -658,7 +660,7 @@ public class ModularLoadManagerImpl implements ModularLoadManager, ZooKeeperCach
                             .canSplitBundle(namespaceBundleFactory.getBundle(namespaceName, bundleRange))) {
                         continue;
                     }
-                    log.info("Load-manager splitting budnle {} and unloading {}", bundleName, unloadSplitBundles);
+                    log.info("Load-manager splitting bundle {} and unloading {}", bundleName, unloadSplitBundles);
                     pulsar.getAdminClient().namespaces().splitNamespaceBundle(namespaceName, bundleRange,
                             unloadSplitBundles);
                     // Make sure the same bundle is not selected again.
@@ -793,7 +795,8 @@ public class ModularLoadManagerImpl implements ModularLoadManager, ZooKeeperCach
                 if (ownerZkSessionId != 0 && ownerZkSessionId != zkClient.getSessionId()) {
                     log.error("Broker znode - [{}] is own by different zookeeper-ssession {} ", brokerZnodePath,
                             ownerZkSessionId);
-                    throw new PulsarServerException("Broker-znode owned by different zk-session " + ownerZkSessionId);
+                    throw new PulsarServerException(
+                            "Broker-znode owned by different zk-session " + ownerZkSessionId);
                 }
                 // Node may already be created by another load manager: in this case update the data.
                 zkClient.setData(brokerZnodePath, localData.getJsonBytes(), -1);

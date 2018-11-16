@@ -20,14 +20,19 @@ package org.apache.pulsar.functions.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.google.common.collect.Sets;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.pulsar.common.configuration.PulsarConfiguration;
 
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -42,19 +47,20 @@ import lombok.experimental.Accessors;
 @EqualsAndHashCode
 @ToString
 @Accessors(chain = true)
-public class WorkerConfig implements Serializable {
+public class WorkerConfig implements Serializable, PulsarConfiguration {
 
     private static final long serialVersionUID = 1L;
 
     private String workerId;
     private String workerHostname;
     private int workerPort;
+    private int workerPortTls;
     private String connectorsDirectory = "./connectors";
     private String functionMetadataTopicName;
+    private String functionWebServiceUrl;
     private String pulsarServiceUrl;
     private String pulsarWebServiceUrl;
     private String clusterCoordinationTopicName;
-    private String functionMetadataSnapshotsTopicPath;
     private String pulsarFunctionsNamespace;
     private String pulsarFunctionsCluster;
     private int numFunctionPackageReplicas;
@@ -69,11 +75,32 @@ public class WorkerConfig implements Serializable {
     private long instanceLivenessCheckFreqMs;
     private String clientAuthenticationPlugin;
     private String clientAuthenticationParameters;
-    private boolean useTls = false;
+    // Frequency how often worker performs compaction on function-topics
+    private long topicCompactionFrequencySec = 30 * 60; // 30 minutes
+    /***** --- TLS --- ****/
+    // Enable TLS
+    private boolean tlsEnabled = false;
+    // Path for the TLS certificate file
+    private String tlsCertificateFilePath;
+    // Path for the TLS private key file
+    private String tlsKeyFilePath;
+    // Path for the trusted TLS certificate file
     private String tlsTrustCertsFilePath = "";
+    // Accept untrusted TLS certificate from client
     private boolean tlsAllowInsecureConnection = false;
+    private boolean tlsRequireTrustedClientCertOnConnect = false;
+    private boolean useTls = false;
     private boolean tlsHostnameVerificationEnable = false;
-    private int metricsSamplingPeriodSec = 60;
+    // Enforce authentication
+    private boolean authenticationEnabled = false;
+    // Autentication provider name list, which is a list of class names
+    private Set<String> authenticationProviders = Sets.newTreeSet();
+    // Enforce authorization on accessing functions admin-api
+    private boolean authorizationEnabled = false;
+    // Role names that are treated as "super-user", meaning they will be able to access any admin-api
+    private Set<String> superUserRoles = Sets.newTreeSet();
+    
+    private Properties properties = new Properties();
 
     @Data
     @Setter
@@ -94,8 +121,45 @@ public class WorkerConfig implements Serializable {
         private String javaInstanceJarLocation;
         private String pythonInstanceLocation;
         private String logDirectory;
+        // the directory for dropping extra function dependencies
+        private String extraFunctionDependenciesDir;
     }
     private ProcessContainerFactory processContainerFactory;
+
+    @Data
+    @Setter
+    @Getter
+    @EqualsAndHashCode
+    @ToString
+    public static class KubernetesContainerFactory {
+        private String k8Uri;
+        private String jobNamespace;
+        private String pulsarDockerImageName;
+        private String pulsarRootDir;
+        private Boolean submittingInsidePod;
+        private String pulsarServiceUrl;
+        private String pulsarAdminUrl;
+        private Boolean installUserCodeDependencies;
+        private String pythonDependencyRepository;
+        private String pythonExtraDependencyRepository;
+        // the directory for dropping extra function dependencies.
+        // If it is not absolute path, it is relative to `pulsarRootDir`
+        private String extraFunctionDependenciesDir;
+        private Map<String, String> customLabels;
+        private Integer expectedMetricsCollectionInterval = 30;
+        // Kubernetes Runtime will periodically checkback on
+        // this configMap if defined and if there are any changes
+        // to the kubernetes specific stuff, we apply those changes
+        private String changeConfigMap;
+        private String changeConfigMapNamespace;
+    }
+    private KubernetesContainerFactory kubernetesContainerFactory;
+
+    // The classname of the secrets provider configurator.
+    private String secretsProviderConfiguratorClassName;
+    // Any config the secret provider configurator might need. This is passed on
+    // to the init method of the secretproviderconfigurator
+    private Map<String, String> secretsProviderConfiguratorConfig;
 
     public String getFunctionMetadataTopic() {
         return String.format("persistent://%s/%s", pulsarFunctionsNamespace, functionMetadataTopicName);
@@ -116,7 +180,7 @@ public class WorkerConfig implements Serializable {
 
     public String getWorkerId() {
         if (StringUtils.isBlank(this.workerId)) {
-            this.workerId = getWorkerHostname();
+            this.workerId = String.format("%s-%s", this.getWorkerHostname(), this.getWorkerPort());
         }
         return this.workerId;
     }
@@ -127,12 +191,21 @@ public class WorkerConfig implements Serializable {
         }
         return this.workerHostname;
     }
-    
+
+    public String getWorkerWebAddress() {
+        return String.format("http://%s:%d", this.getWorkerHostname(), this.getWorkerPort());
+    }
+
     public static String unsafeLocalhostResolve() {
         try {
             return InetAddress.getLocalHost().getHostName();
         } catch (UnknownHostException ex) {
             throw new IllegalStateException("Failed to resolve localhost name.", ex);
         }
+    }
+  
+    @Override
+    public void setProperties(Properties properties) {
+        this.properties = properties;
     }
 }

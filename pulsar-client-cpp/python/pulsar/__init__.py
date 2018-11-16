@@ -104,6 +104,10 @@ from pulsar.functions.function import Function
 from pulsar.functions.context import Context
 from pulsar.functions.serde import SerDe, IdentitySerDe, PickleSerDe
 
+import re
+_retype = type(re.compile('x'))
+
+
 class MessageId:
     """
     Represents a message id
@@ -117,18 +121,18 @@ class MessageId:
 
     def serialize(self):
         """
-        Returns a string representation of the message id.
-        This string can be stored and later deserialized.
+        Returns a bytes representation of the message id.
+        This bytes sequence can be stored and later deserialized.
         """
         return self._msg_id.serialize()
 
     @staticmethod
-    def deserialize(message_id_str):
+    def deserialize(message_id_bytes):
         """
         Deserialize a message id object from a previously
-        serialized string.
+        serialized bytes sequence.
         """
-        return _pulsar.MessageId.deserialize(message_id_str)
+        return _pulsar.MessageId.deserialize(message_id_bytes)
 
 
 class Message:
@@ -315,12 +319,14 @@ class Client:
                         send_timeout_millis=30000,
                         compression_type=CompressionType.NONE,
                         max_pending_messages=1000,
+                        max_pending_messages_across_partitions=50000,
                         block_if_queue_full=False,
                         batching_enabled=False,
                         batching_max_messages=1000,
                         batching_max_allowed_size_in_bytes=128*1024,
                         batching_max_publish_delay_ms=10,
-                        message_routing_mode=PartitionsRoutingMode.RoundRobinDistribution
+                        message_routing_mode=PartitionsRoutingMode.RoundRobinDistribution,
+                        properties=None,
                         ):
         """
         Create a new producer on a given topic.
@@ -331,6 +337,7 @@ class Client:
           The topic name
 
         **Options**
+
         * `producer_name`:
            Specify a name for the producer. If not assigned,
            the system will generate a globally unique name which can be accessed
@@ -352,11 +359,17 @@ class Client:
         * `max_pending_messages`:
           Set the max size of the queue holding the messages pending to receive
           an acknowledgment from the broker.
+        * `max_pending_messages_across_partitions`:
+          Set the max size of the queue holding the messages pending to receive
+          an acknowledgment across partitions from the broker.
         * `block_if_queue_full`: Set whether `send_async` operations should
           block when the outgoing message queue is full.
         * `message_routing_mode`:
           Set the message routing mode for the partitioned producer. Default is `PartitionsRoutingMode.RoundRobinDistribution`,
           other option is `PartitionsRoutingMode.UseSinglePartition`
+        * `properties`:
+          Sets the properties for the producer. The properties associated with a producer
+          can be used for identify a producer at broker side.
         """
         _check_type(str, topic, 'topic')
         _check_type_or_none(str, producer_name, 'producer_name')
@@ -364,16 +377,19 @@ class Client:
         _check_type(int, send_timeout_millis, 'send_timeout_millis')
         _check_type(CompressionType, compression_type, 'compression_type')
         _check_type(int, max_pending_messages, 'max_pending_messages')
+        _check_type(int, max_pending_messages_across_partitions, 'max_pending_messages_across_partitions')
         _check_type(bool, block_if_queue_full, 'block_if_queue_full')
         _check_type(bool, batching_enabled, 'batching_enabled')
         _check_type(int, batching_max_messages, 'batching_max_messages')
         _check_type(int, batching_max_allowed_size_in_bytes, 'batching_max_allowed_size_in_bytes')
         _check_type(int, batching_max_publish_delay_ms, 'batching_max_publish_delay_ms')
+        _check_type_or_none(dict, properties, 'properties')
 
         conf = _pulsar.ProducerConfiguration()
         conf.send_timeout_millis(send_timeout_millis)
         conf.compression_type(compression_type)
         conf.max_pending_messages(max_pending_messages)
+        conf.max_pending_messages_across_partitions(max_pending_messages_across_partitions)
         conf.block_if_queue_full(block_if_queue_full)
         conf.batching_enabled(batching_enabled)
         conf.batching_max_messages(batching_max_messages)
@@ -384,6 +400,10 @@ class Client:
             conf.producer_name(producer_name)
         if initial_sequence_id:
             conf.initial_sequence_id(initial_sequence_id)
+        if properties:
+            for k, v in properties.items():
+                conf.property(k, v)
+
         p = Producer()
         p._producer = self._client.create_producer(topic, conf)
         return p
@@ -392,17 +412,24 @@ class Client:
                   consumer_type=ConsumerType.Exclusive,
                   message_listener=None,
                   receiver_queue_size=1000,
+                  max_total_receiver_queue_size_across_partitions=50000,
                   consumer_name=None,
                   unacked_messages_timeout_ms=None,
                   broker_consumer_stats_cache_time_ms=30000,
-                  is_read_compacted=False
+                  is_read_compacted=False,
+                  properties=None,
+                  pattern_auto_discovery_period=60
                   ):
         """
         Subscribe to the given topic and subscription combination.
 
         **Args**
 
-        * `topic`: The name of the topic.
+        * `topic`: The name of the topic, list of topics or regex pattern.
+                  This method will accept these forms:
+                    - `topic='my-topic'`
+                    - `topic=['topic-1', 'topic-2', 'topic-3']`
+                    - `topic=re.compile('topic-.*')`
         * `subscription`: The name of the subscription.
 
         **Options**
@@ -434,6 +461,9 @@ class Client:
           should not be interrupted when the consumer queue size is zero. The
           default value is 1000 messages and should work well for most use
           cases.
+        * `max_total_receiver_queue_size_across_partitions`
+          Set the max total receiver queue size across partitions.
+          This setting will be used to reduce the receiver queue size for individual partitions
         * `consumer_name`:
           Sets the consumer name.
         * `unacked_messages_timeout_ms`:
@@ -445,15 +475,22 @@ class Client:
         * `broker_consumer_stats_cache_time_ms`:
           Sets the time duration for which the broker-side consumer stats will
           be cached in the client.
+        * `properties`:
+          Sets the properties for the consumer. The properties associated with a consumer
+          can be used for identify a consumer at broker side.
+        * `pattern_auto_discovery_period`:
+          Periods of seconds for consumer to auto discover match topics.
         """
-        _check_type(str, topic, 'topic')
         _check_type(str, subscription_name, 'subscription_name')
         _check_type(ConsumerType, consumer_type, 'consumer_type')
         _check_type(int, receiver_queue_size, 'receiver_queue_size')
+        _check_type(int, max_total_receiver_queue_size_across_partitions,
+                    'max_total_receiver_queue_size_across_partitions')
         _check_type_or_none(str, consumer_name, 'consumer_name')
         _check_type_or_none(int, unacked_messages_timeout_ms, 'unacked_messages_timeout_ms')
         _check_type(int, broker_consumer_stats_cache_time_ms, 'broker_consumer_stats_cache_time_ms')
         _check_type(bool, is_read_compacted, 'is_read_compacted')
+        _check_type_or_none(dict, properties, 'properties')
 
         conf = _pulsar.ConsumerConfiguration()
         conf.consumer_type(consumer_type)
@@ -461,13 +498,29 @@ class Client:
         if message_listener:
             conf.message_listener(message_listener)
         conf.receiver_queue_size(receiver_queue_size)
+        conf.max_total_receiver_queue_size_across_partitions(max_total_receiver_queue_size_across_partitions)
         if consumer_name:
             conf.consumer_name(consumer_name)
         if unacked_messages_timeout_ms:
             conf.unacked_messages_timeout_ms(unacked_messages_timeout_ms)
         conf.broker_consumer_stats_cache_time_ms(broker_consumer_stats_cache_time_ms)
+        if properties:
+            for k, v in properties.items():
+                conf.property(k, v)
+
         c = Consumer()
-        c._consumer = self._client.subscribe(topic, subscription_name, conf)
+        if isinstance(topic, str):
+            # Single topic
+            c._consumer = self._client.subscribe(topic, subscription_name, conf)
+        elif isinstance(topic, list):
+            # List of topics
+            c._consumer = self._client.subscribe_topics(topic, subscription_name, conf)
+        elif isinstance(topic, _retype):
+            # Regex pattern
+            c._consumer = self._client.subscribe_pattern(topic.pattern, subscription_name, conf)
+        else:
+            raise ValueError("Argument 'topic' is expected to be of a type between (str, list, re.pattern)")
+
         c._client = self
         self._consumers.append(c)
         return c
@@ -542,6 +595,21 @@ class Client:
         c._client = self
         self._consumers.append(c)
         return c
+
+    def get_topic_partitions(self, topic):
+        """
+        Get the list of partitions for a given topic.
+
+        If the topic is partitioned, this will return a list of partition names. If the topic is not
+        partitioned, the returned list will contain the topic name itself.
+
+        This can be used to discover the partitions and create Reader, Consumer or Producer
+        instances directly on a particular partition.
+        :param topic: the topic name to lookup
+        :return: a list of partition name
+        """
+        _check_type(str, topic, 'topic')
+        return self._client.get_topic_partitions(topic)
 
     def close(self):
         """

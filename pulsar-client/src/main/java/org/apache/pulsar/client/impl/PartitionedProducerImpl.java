@@ -53,8 +53,8 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
     private final TopicMetadata topicMetadata;
 
     public PartitionedProducerImpl(PulsarClientImpl client, String topic, ProducerConfigurationData conf, int numPartitions,
-            CompletableFuture<Producer<T>> producerCreatedFuture, Schema<T> schema) {
-        super(client, topic, conf, producerCreatedFuture, schema);
+            CompletableFuture<Producer<T>> producerCreatedFuture, Schema<T> schema, ProducerInterceptors<T> interceptors) {
+        super(client, topic, conf, producerCreatedFuture, schema, interceptors);
         this.producers = Lists.newArrayListWithCapacity(numPartitions);
         this.topicMetadata = new TopicMetadataImpl(numPartitions);
         this.routerPolicy = getMessageRouter();
@@ -111,7 +111,7 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
         for (int partitionIndex = 0; partitionIndex < topicMetadata.numPartitions(); partitionIndex++) {
             String partitionName = TopicName.get(topic).getPartition(partitionIndex).toString();
             ProducerImpl<T> producer = new ProducerImpl<>(client, partitionName, conf, new CompletableFuture<>(),
-                    partitionIndex, schema);
+                    partitionIndex, schema, interceptors);
             producers.add(producer);
             producer.producerCreatedFuture().handle((prod, createException) -> {
                 if (createException != null) {
@@ -126,15 +126,15 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
                 if (completed.incrementAndGet() == topicMetadata.numPartitions()) {
                     if (createFail.get() == null) {
                         setState(State.Ready);
-                        producerCreatedFuture().complete(PartitionedProducerImpl.this);
                         log.info("[{}] Created partitioned producer", topic);
+                        producerCreatedFuture().complete(PartitionedProducerImpl.this);
                     } else {
+                        log.error("[{}] Could not create partitioned producer.", topic, createFail.get().getCause());
                         closeAsync().handle((ok, closeException) -> {
                             producerCreatedFuture().completeExceptionally(createFail.get());
                             client.cleanupProducer(this);
                             return null;
                         });
-                        log.error("[{}] Could not create partitioned producer.", topic, createFail.get().getCause());
                     }
                 }
 
@@ -236,6 +236,10 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
     }
 
     private static final Logger log = LoggerFactory.getLogger(PartitionedProducerImpl.class);
+
+    public List<ProducerImpl<T>> getProducers() {
+        return producers.stream().collect(Collectors.toList());
+    }
 
     @Override
     String getHandlerName() {

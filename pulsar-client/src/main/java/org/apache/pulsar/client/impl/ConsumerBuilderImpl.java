@@ -20,6 +20,8 @@ package org.apache.pulsar.client.impl;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -32,7 +34,9 @@ import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.ConsumerBuilder;
 import org.apache.pulsar.client.api.ConsumerCryptoFailureAction;
 import org.apache.pulsar.client.api.ConsumerEventListener;
+import org.apache.pulsar.client.api.ConsumerInterceptor;
 import org.apache.pulsar.client.api.CryptoKeyReader;
+import org.apache.pulsar.client.api.DeadLetterPolicy;
 import org.apache.pulsar.client.api.MessageListener;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.PulsarClientException.InvalidConfigurationException;
@@ -41,6 +45,7 @@ import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.conf.ConfigurationDataUtils;
 import org.apache.pulsar.client.impl.conf.ConsumerConfigurationData;
+import org.apache.pulsar.common.api.proto.PulsarApi.CommandGetTopicsOfNamespace.Mode;
 import org.apache.pulsar.common.util.FutureUtil;
 
 import com.google.common.collect.Lists;
@@ -52,10 +57,11 @@ public class ConsumerBuilderImpl<T> implements ConsumerBuilder<T> {
     private final PulsarClientImpl client;
     private ConsumerConfigurationData<T> conf;
     private final Schema<T> schema;
+    private List<ConsumerInterceptor<T>> interceptorList;
 
     private static long MIN_ACK_TIMEOUT_MILLIS = 1000;
 
-    ConsumerBuilderImpl(PulsarClientImpl client, Schema<T> schema) {
+    public ConsumerBuilderImpl(PulsarClientImpl client, Schema<T> schema) {
         this(client, new ConsumerConfigurationData<T>(), schema);
     }
 
@@ -104,8 +110,9 @@ public class ConsumerBuilderImpl<T> implements ConsumerBuilder<T> {
             return FutureUtil.failedFuture(
                     new InvalidConfigurationException("Subscription name must be set on the consumer builder"));
         }
-
-        return client.subscribeAsync(conf, schema);
+        return interceptorList == null || interceptorList.size() == 0 ?
+                client.subscribeAsync(conf, schema, null) :
+                client.subscribeAsync(conf, schema, new ConsumerInterceptors<>(interceptorList));
     }
 
     @Override
@@ -242,7 +249,28 @@ public class ConsumerBuilderImpl<T> implements ConsumerBuilder<T> {
 		return this;
 	}
 
-	public ConsumerConfigurationData<T> getConf() {
-	    return conf;
-	}
+    @Override
+    public ConsumerBuilder<T> subscriptionTopicsMode(Mode mode) {
+        conf.setSubscriptionTopicsMode(mode);
+        return this;
+    }
+
+    @Override
+    public ConsumerBuilder<T> intercept(ConsumerInterceptor<T>... interceptors) {
+        if (interceptorList == null) {
+            interceptorList = new ArrayList<>();
+        }
+        interceptorList.addAll(Arrays.asList(interceptors));
+        return this;
+    }
+
+    @Override
+    public ConsumerBuilder<T> deadLetterPolicy(DeadLetterPolicy deadLetterPolicy) {
+        conf.setDeadLetterPolicy(deadLetterPolicy);
+        return this;
+    }
+
+    public ConsumerConfigurationData<T> getConf() {
+        return conf;
+    }
 }

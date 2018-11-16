@@ -34,38 +34,24 @@ import java.net.URI;
 import java.util.HashSet;
 
 @Slf4j
-public class Worker extends AbstractService {
+public class Worker {
 
     private final WorkerConfig workerConfig;
     private final WorkerService workerService;
-    private Thread serverThread;
+    private WorkerServer server;
 
     public Worker(WorkerConfig workerConfig) {
         this.workerConfig = workerConfig;
         this.workerService = new WorkerService(workerConfig);
     }
 
-    @Override
-    protected void doStart() {
-        try {
-            doStartImpl();
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            log.error("Interrupted at starting worker", ie);
-        } catch (Throwable t) {
-            log.error("Failed to start worker", t);
-        }
-    }
-
-    protected void doStartImpl() throws InterruptedException, IOException, PulsarAdminException {
+    protected void start() throws Exception {
         URI dlogUri = initialize(this.workerConfig);
 
         workerService.start(dlogUri);
-        WorkerServer server = new WorkerServer(workerService);
-        this.serverThread = new Thread(server, server.getThreadName());
-
+        this.server = new WorkerServer(workerService);
+        this.server.start();
         log.info("Start worker server on port {}...", this.workerConfig.getWorkerPort());
-        this.serverThread.start();
     }
 
     private static URI initialize(WorkerConfig workerConfig)
@@ -148,16 +134,15 @@ public class Worker extends AbstractService {
         }
     }
 
-    @Override
-    protected void doStop() {
-        if (null != serverThread) {
-            serverThread.interrupt();
-            try {
-                serverThread.join();
-            } catch (InterruptedException e) {
-                log.warn("Worker server thread is interrupted", e);
+    protected void stop() {
+        try {
+            if (null != this.server) {
+                this.server.stop();
             }
+            workerService.stop();    
+        }catch(Exception e) {
+            log.warn("Failed to gracefully stop worker service ", e);
         }
-        workerService.stop();
+        
     }
 }

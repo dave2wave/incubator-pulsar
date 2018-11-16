@@ -4,7 +4,7 @@ title: Custom schema storage
 sidebar_label: Custom schema storage
 ---
 
-By default, Pulsar stores data type [schemas](getting-started-concepts-and-architecture.md#schema-registry) in [Apache BookKeeper](https://bookkeeper.apache.org) (which is deployed alongside Pulsar). You can, however, use another storage system if you wish. This doc walks you through creating your own schema storage implementation.
+By default, Pulsar stores data type [schemas](concepts-schema-registry.md) in [Apache BookKeeper](https://bookkeeper.apache.org) (which is deployed alongside Pulsar). You can, however, use another storage system if you wish. This doc walks you through creating your own schema storage implementation.
 
 In order to use a non-default (i.e. non-BookKeeper) storage system for Pulsar schemas, you need to implement two Java interfaces: [`SchemaStorage`](#schemastorage-interface) and [`SchemaStorageFactory`](#schemastoragefactory-interface).
 
@@ -34,7 +34,7 @@ public interface SchemaStorage {
 }
 ```
 
-> For a full-fledged example schema storage implementation, see the [`BookKeeperSchemaStorage`](https://github.com/apache/incubator-pulsar/blob/master/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/schema/BookkeeperSchemaStorage.java) class.
+> For a full-fledged example schema storage implementation, see the [`BookKeeperSchemaStorage`](https://github.com/apache/pulsar/blob/master/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/schema/BookkeeperSchemaStorage.java) class.
 
 ## SchemaStorageFactory interface 
 
@@ -45,7 +45,7 @@ public interface SchemaStorageFactory {
 }
 ```
 
-> For a full-fledged example schema storage factory implementation, see the [`BookKeeperSchemaStorageFactory`](https://github.com/apache/incubator-pulsar/blob/master/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/schema/BookkeeperSchemaStorageFactory.java) class.
+> For a full-fledged example schema storage factory implementation, see the [`BookKeeperSchemaStorageFactory`](https://github.com/apache/pulsar/blob/master/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/schema/BookkeeperSchemaStorageFactory.java) class.
 
 ## Deployment
 

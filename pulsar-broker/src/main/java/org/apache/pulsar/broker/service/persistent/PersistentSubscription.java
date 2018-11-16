@@ -103,11 +103,6 @@ public class PersistentSubscription implements Subscription {
             throw new SubscriptionFencedException("Subscription is fenced");
         }
 
-        if (topic.getManagedLedger().isTerminated() && cursor.getNumberOfEntriesInBacklog() == 0) {
-            // Immediately notify the consumer that there are no more available messages
-            consumer.reachedEndOfTopic();
-        }
-
         if (dispatcher == null || !dispatcher.isConsumerConnected()) {
             switch (consumer.subType()) {
             case Exclusive:
@@ -200,6 +195,7 @@ public class PersistentSubscription implements Subscription {
                 log.debug("[{}][{}] Individual acks on {}", topicName, subName, positions);
             }
             cursor.asyncDelete(positions, deleteCallback, positions);
+            dispatcher.getRedeliveryTracker().removeBatch(positions);
         }
 
         if (topic.getManagedLedger().isTerminated() && cursor.getNumberOfEntriesInBacklog() == 0) {
@@ -630,6 +626,12 @@ public class PersistentSubscription implements Subscription {
         }
 
         subStats.type = getType();
+        if (dispatcher instanceof PersistentDispatcherSingleActiveConsumer) {
+            Consumer activeConsumer = ((PersistentDispatcherSingleActiveConsumer) dispatcher).getActiveConsumer();
+            if (activeConsumer != null) {
+                subStats.activeConsumerName = activeConsumer.consumerName();
+            }
+        }
         if (SubType.Shared.equals(subStats.type)) {
             if (dispatcher instanceof PersistentDispatcherMultipleConsumers) {
                 subStats.unackedMessages = ((PersistentDispatcherMultipleConsumers) dispatcher)
@@ -640,6 +642,7 @@ public class PersistentSubscription implements Subscription {
         }
         subStats.msgBacklog = getNumberOfEntriesInBacklog();
         subStats.msgRateExpired = expiryMonitor.getMessageExpiryRate();
+
         return subStats;
     }
 

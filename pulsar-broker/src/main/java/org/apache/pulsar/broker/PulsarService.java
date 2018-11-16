@@ -18,10 +18,12 @@
  */
 package org.apache.pulsar.broker;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 import static org.apache.pulsar.broker.admin.impl.NamespacesBase.getBundles;
 import static org.apache.pulsar.broker.cache.ConfigurationCacheService.POLICIES;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -46,9 +48,13 @@ import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.mledger.LedgerOffloader;
+import org.apache.bookkeeper.mledger.LedgerOffloaderFactory;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.impl.NullLedgerOffloader;
+import org.apache.bookkeeper.mledger.offload.OffloaderUtils;
+import org.apache.bookkeeper.mledger.offload.Offloaders;
 import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
 import org.apache.pulsar.broker.admin.AdminResource;
 import org.apache.pulsar.broker.cache.ConfigurationCacheService;
@@ -61,7 +67,6 @@ import org.apache.pulsar.broker.loadbalance.LoadResourceQuotaUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadSheddingTask;
 import org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared;
 import org.apache.pulsar.broker.namespace.NamespaceService;
-import org.apache.pulsar.broker.offload.impl.BlobStoreManagedLedgerOffloader;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.schema.SchemaRegistryService;
@@ -69,6 +74,7 @@ import org.apache.pulsar.broker.stats.MetricsGenerator;
 import org.apache.pulsar.broker.stats.prometheus.PrometheusMetricsServlet;
 import org.apache.pulsar.broker.web.WebService;
 import org.apache.pulsar.client.admin.PulsarAdmin;
+import org.apache.pulsar.client.admin.PulsarAdminBuilder;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.common.conf.InternalConfigurationData;
@@ -87,6 +93,7 @@ import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.compaction.Compactor;
 import org.apache.pulsar.compaction.TwoPhaseCompactor;
 import org.apache.pulsar.functions.worker.Utils;
+import org.apache.pulsar.functions.worker.WorkerConfig;
 import org.apache.pulsar.functions.worker.WorkerService;
 import org.apache.pulsar.utils.PulsarBrokerVersionStringUtils;
 import org.apache.pulsar.websocket.WebSocketConsumerServlet;
@@ -138,6 +145,7 @@ public class PulsarService implements AutoCloseable {
     private final ScheduledExecutorService loadManagerExecutor;
     private ScheduledExecutorService compactorExecutor;
     private OrderedScheduler offloaderScheduler;
+    private Offloaders offloaderManager = new Offloaders();
     private LedgerOffloader offloader;
     private ScheduledFuture<?> loadReportTask = null;
     private ScheduledFuture<?> loadSheddingTask = null;
@@ -284,6 +292,8 @@ public class PulsarService implements AutoCloseable {
                 schemaRegistryService.close();
             }
 
+            offloaderManager.close();
+
             state = State.Closed;
 
         } catch (Exception e) {
@@ -300,6 +310,15 @@ public class PulsarService implements AutoCloseable {
      */
     public ServiceConfiguration getConfiguration() {
         return this.config;
+    }
+
+    /**
+     * Get the current function worker service configuration.
+     *
+     * @return the current function worker service configuration.
+     */
+    public Optional<WorkerConfig> getWorkerConfig() {
+        return functionWorkerService.map(service -> service.getWorkerConfig());
     }
 
     /**
@@ -357,7 +376,7 @@ public class PulsarService implements AutoCloseable {
             this.webService.addRestResources("/lookup", "org.apache.pulsar.broker.lookup", true, attributeMap);
 
             this.webService.addServlet("/metrics",
-                    new ServletHolder(new PrometheusMetricsServlet(this, config.exposeTopicLevelMetricsInPrometheus())),
+                    new ServletHolder(new PrometheusMetricsServlet(this, config.exposeTopicLevelMetricsInPrometheus(), config.exposeConsumerLevelMetricsInPrometheus())),
                     false, attributeMap);
 
             if (config.isWebSocketServiceEnabled()) {
@@ -559,7 +578,7 @@ public class PulsarService implements AutoCloseable {
             List<CompletableFuture<Topic>> persistentTopics = Lists.newArrayList();
             long topicLoadStart = System.nanoTime();
 
-            for (String topic : getNamespaceService().getListOfTopics(nsName)) {
+            for (String topic : getNamespaceService().getListOfPersistentTopics(nsName)) {
                 try {
                     TopicName topicName = TopicName.get(topic);
                     if (bundle.includes(topicName)) {
@@ -654,13 +673,37 @@ public class PulsarService implements AutoCloseable {
         return offloader;
     }
 
+    // TODO: improve the user metadata in subsequent changes
+    static final String METADATA_SOFTWARE_VERSION_KEY = "S3ManagedLedgerOffloaderSoftwareVersion";
+    static final String METADATA_SOFTWARE_GITSHA_KEY = "S3ManagedLedgerOffloaderSoftwareGitSha";
+
+
     public synchronized LedgerOffloader createManagedLedgerOffloader(ServiceConfiguration conf)
             throws PulsarServerException {
-        if (conf.getManagedLedgerOffloadDriver() != null
-            && BlobStoreManagedLedgerOffloader.driverSupported(conf.getManagedLedgerOffloadDriver())) {
-                return BlobStoreManagedLedgerOffloader.create(conf, getOffloaderScheduler(conf));
-        } else {
-            return NullLedgerOffloader.INSTANCE;
+        try {
+            if (StringUtils.isNotBlank(conf.getManagedLedgerOffloadDriver())) {
+                checkNotNull(conf.getOffloadersDirectory(),
+                    "Offloader driver is configured to be '%s' but no offloaders directory is configured.",
+                    conf.getManagedLedgerOffloadDriver());
+                this.offloaderManager = OffloaderUtils.searchForOffloaders(conf.getOffloadersDirectory());
+                LedgerOffloaderFactory offloaderFactory = this.offloaderManager.getOffloaderFactory(
+                    conf.getManagedLedgerOffloadDriver());
+                try {
+                    return offloaderFactory.create(
+                        conf.getProperties(),
+                        ImmutableMap.of(
+                            METADATA_SOFTWARE_VERSION_KEY.toLowerCase(), PulsarBrokerVersionStringUtils.getNormalizedVersionString(),
+                            METADATA_SOFTWARE_GITSHA_KEY.toLowerCase(), PulsarBrokerVersionStringUtils.getGitSha()
+                        ),
+                        getOffloaderScheduler(conf));
+                } catch (IOException ioe) {
+                    throw new PulsarServerException(ioe.getMessage(), ioe.getCause());
+                }
+            } else {
+                return NullLedgerOffloader.INSTANCE;
+            }
+        } catch (Throwable t) {
+            throw new PulsarServerException(t);
         }
     }
 
@@ -761,12 +804,19 @@ public class PulsarService implements AutoCloseable {
     public synchronized PulsarAdmin getAdminClient() throws PulsarServerException {
         if (this.adminClient == null) {
             try {
-                String adminApiUrl = webAddress(config);
-                this.adminClient = PulsarAdmin.builder().serviceHttpUrl(adminApiUrl) //
+                ServiceConfiguration conf = this.getConfiguration();
+                String adminApiUrl = conf.isBrokerClientTlsEnabled() ? webAddressTls(config) : webAddress(config);
+                PulsarAdminBuilder builder = PulsarAdmin.builder().serviceHttpUrl(adminApiUrl) //
                         .authentication( //
-                                this.getConfiguration().getBrokerClientAuthenticationPlugin(), //
-                                this.getConfiguration().getBrokerClientAuthenticationParameters()) //
-                        .build();
+                                conf.getBrokerClientAuthenticationPlugin(), //
+                                conf.getBrokerClientAuthenticationParameters());
+                
+                if (conf.isBrokerClientTlsEnabled()) {
+                    builder.tlsTrustCertsFilePath(conf.getBrokerClientTrustCertsFilePath());
+                    builder.allowTlsInsecureConnection(conf.isTlsAllowInsecureConnection());
+                }
+                
+                this.adminClient = builder.build();
                 LOG.info("Admin api url: " + adminApiUrl);
             } catch (Exception e) {
                 throw new PulsarServerException(e);
@@ -794,27 +844,43 @@ public class PulsarService implements AutoCloseable {
     }
 
     public static String brokerUrl(ServiceConfiguration config) {
-        return "pulsar://" + advertisedAddress(config) + ":" + config.getBrokerServicePort();
+        return brokerUrl(advertisedAddress(config), config.getBrokerServicePort());
+    }
+
+    public static String brokerUrl(String host, int port) {
+        return String.format("pulsar://%s:%d", host, port);
     }
 
     public static String brokerUrlTls(ServiceConfiguration config) {
         if (config.isTlsEnabled()) {
-            return "pulsar://" + advertisedAddress(config) + ":" + config.getBrokerServicePortTls();
+            return brokerUrlTls(advertisedAddress(config), config.getBrokerServicePortTls());
         } else {
             return "";
         }
     }
 
+    public static String brokerUrlTls(String host, int port) {
+        return String.format("pulsar+ssl://%s:%d", host, port);
+    }
+
     public static String webAddress(ServiceConfiguration config) {
-        return String.format("http://%s:%d", advertisedAddress(config), config.getWebServicePort());
+        return webAddress(advertisedAddress(config), config.getWebServicePort());
+    }
+
+    public static String webAddress(String host, int port) {
+        return String.format("http://%s:%d", host, port);
     }
 
     public static String webAddressTls(ServiceConfiguration config) {
         if (config.isTlsEnabled()) {
-            return String.format("https://%s:%d", advertisedAddress(config), config.getWebServicePortTls());
+            return webAddressTls(advertisedAddress(config), config.getWebServicePortTls());
         } else {
             return "";
         }
+    }
+
+    public static String webAddressTls(String host, int port) {
+        return String.format("https://%s:%d", host, port);
     }
 
     public String getBindAddress() {
@@ -934,7 +1000,8 @@ public class PulsarService implements AutoCloseable {
             InternalConfigurationData internalConf = new InternalConfigurationData(
                     this.getConfiguration().getZookeeperServers(),
                     this.getConfiguration().getConfigurationStoreServers(),
-                    new ClientConfiguration().getZkLedgersRootPath());
+                    new ClientConfiguration().getZkLedgersRootPath(),
+                    this.getWorkerConfig().map(wc -> wc.getStateStorageServiceUrl()).orElse(null));
 
             URI dlogURI;
             try {

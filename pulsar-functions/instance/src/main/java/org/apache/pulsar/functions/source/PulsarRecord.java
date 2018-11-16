@@ -29,7 +29,7 @@ import lombok.ToString;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.common.api.EncryptionContext;
-import org.apache.pulsar.functions.utils.Utils;
+import org.apache.pulsar.functions.instance.Utils;
 
 @Builder
 @Getter
@@ -40,9 +40,7 @@ public class PulsarRecord<T> implements RecordWithEncryptionContext<T> {
     private final String topicName;
     private final int partition;
 
-    // TODO: When we switch to schema for functions, we should just rely on the message object value
-    private final T value;
-    private final Message<byte[]> message;
+    private final Message<T> message;
 
     private final Runnable failFunction;
     private final Runnable ackFunction;
@@ -69,6 +67,20 @@ public class PulsarRecord<T> implements RecordWithEncryptionContext<T> {
     @Override
     public Optional<Long> getRecordSequence() {
         return Optional.of(Utils.getSequenceId(message.getMessageId()));
+    }
+
+    @Override
+    public T getValue() {
+        return message.getValue();
+    }
+
+    @Override
+    public Optional<Long> getEventTime() {
+        if (message.getEventTime() != 0) {
+            return Optional.of(message.getEventTime());
+        } else {
+            return Optional.empty();
+        }
     }
 
     @Override

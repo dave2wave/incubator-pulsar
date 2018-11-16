@@ -42,6 +42,10 @@ if (NOT CXX_STANDARD)
     set(CXX_STANDARD "-std=c++11")
 endif(NOT CXX_STANDARD)
 
+if (NOT C_STANDARD)
+    set(C_STANDARD "-std=c11")
+endif(NOT C_STANDARD)
+
 set(CMAKE_CXX_FLAGS " -msse4.2 -mpclmul -Wno-deprecated-declarations ${CXX_STANDARD} ${CMAKE_CXX_FLAGS}")
 
 
@@ -110,7 +114,7 @@ if (PYTHONLIBS_VERSION_STRING MATCHES "^3.+$")
     list(GET PYTHONLIBS_VERSION_NO_LIST 1 PYTHONLIBS_VERSION_MINOR)
     set(BOOST_PYTHON_NAME_POSTFIX ${PYTHONLIBS_VERSION_MAJOR}${PYTHONLIBS_VERSION_MINOR})
     # For python3 the lib name is boost_python3
-    set(BOOST_PYTHON_NAME_LIST python3;python3-mt;python-py${BOOST_PYTHON_NAME_POSTFIX};python${BOOST_PYTHON_NAME_POSTFIX}-mt)
+    set(BOOST_PYTHON_NAME_LIST python3;python3-mt;python-py${BOOST_PYTHON_NAME_POSTFIX};python${BOOST_PYTHON_NAME_POSTFIX}-mt;python${BOOST_PYTHON_NAME_POSTFIX})
 else ()
     # Regular boost_python
     set(BOOST_PYTHON_NAME_LIST python;python-mt;python-py27;python27-mt)
@@ -242,7 +246,10 @@ endif()
 add_subdirectory(python)
 
 # `make format` option
-set(CLANG_FORMAT_VERSION "5.0")
+if (NOT APPLE)
+    set(CLANG_FORMAT_VERSION "5.0")
+endif()
+
 find_package(ClangTools)
 set(BUILD_SUPPORT_DIR "${CMAKE_SOURCE_DIR}/build-support")
 add_custom_target(format ${BUILD_SUPPORT_DIR}/run_clang_format.py

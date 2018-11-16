@@ -21,17 +21,18 @@ package org.apache.pulsar.client.impl;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationFactory;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.PulsarClientException.UnsupportedAuthenticationException;
+import org.apache.pulsar.client.api.ServiceUrlProvider;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.client.impl.conf.ConfigurationDataUtils;
 
 public class ClientBuilderImpl implements ClientBuilder {
-
     ClientConfigurationData conf;
 
     public ClientBuilderImpl() {
@@ -44,11 +45,17 @@ public class ClientBuilderImpl implements ClientBuilder {
 
     @Override
     public PulsarClient build() throws PulsarClientException {
-        if (conf.getServiceUrl() == null) {
-            throw new IllegalArgumentException("service URL needs to be specified on the ClientBuilder object");
+        if (conf.getServiceUrlProvider() != null && StringUtils.isNotBlank(conf.getServiceUrlProvider().getServiceUrl())) {
+            conf.setServiceUrl(conf.getServiceUrlProvider().getServiceUrl());
         }
-
-        return new PulsarClientImpl(conf);
+        if (conf.getServiceUrl() == null) {
+            throw new IllegalArgumentException("service URL or service URL provider needs to be specified on the ClientBuilder object");
+        }
+        PulsarClient client = new PulsarClientImpl(conf);
+        if (conf.getServiceUrlProvider() != null) {
+            conf.getServiceUrlProvider().initialize(client);
+        }
+        return client;
     }
 
     @Override
@@ -66,6 +73,15 @@ public class ClientBuilderImpl implements ClientBuilder {
     @Override
     public ClientBuilder serviceUrl(String serviceUrl) {
         conf.setServiceUrl(serviceUrl);
+        if (!conf.isUseTls()) {
+            enableTls(serviceUrl.startsWith("pulsar+ssl") || serviceUrl.startsWith("https"));
+        }
+        return this;
+    }
+
+    @Override
+    public ClientBuilder serviceUrlProvider(ServiceUrlProvider serviceUrlProvider) {
+        conf.setServiceUrlProvider(serviceUrlProvider);
         return this;
     }
 

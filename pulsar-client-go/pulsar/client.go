@@ -49,7 +49,7 @@ type ClientOptions struct {
 
 	// Set the operation timeout (default: 30 seconds)
 	// Producer-create, subscribe and unsubscribe operations will be retried until this interval, after which the
-	// operation will be maked as failed
+	// operation will be marked as failed
 	OperationTimeoutSeconds time.Duration
 
 	// Set the number of threads to be used for message listeners (default: 1 thread)
@@ -95,6 +95,16 @@ type Client interface {
 	// Create a Reader instance.
 	// This method will block until the reader is created successfully.
 	CreateReader(ReaderOptions) (Reader, error)
+
+	// Fetch the list of partitions for a given topic
+	//
+	// If the topic is partitioned, this will return a list of partition names.
+	// If the topic is not partitioned, the returned list will contain the topic
+	// name itself.
+	//
+	// This can be used to discover the partitions and create {@link Reader},
+	// {@link Consumer} or {@link Producer} instances directly on a particular partition.
+	TopicPartitions(topic string) ([]string, error)
 
 	// Close the Client and free associated resources
 	Close() error

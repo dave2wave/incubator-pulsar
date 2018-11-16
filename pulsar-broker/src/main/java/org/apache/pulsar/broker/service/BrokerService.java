@@ -74,6 +74,7 @@ import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.util.ZkUtils;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.admin.AdminResource;
@@ -208,7 +209,7 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
                 .name("broker-topic-workers").build();
         final DefaultThreadFactory acceptorThreadFactory = new DefaultThreadFactory("pulsar-acceptor");
         final DefaultThreadFactory workersThreadFactory = new DefaultThreadFactory("pulsar-io");
-        final int numThreads = Runtime.getRuntime().availableProcessors() * 2;
+        final int numThreads = pulsar.getConfiguration().getNumIOThreads();
         log.info("Using {} threads for broker service IO", numThreads);
 
         this.acceptorGroup = EventLoopUtil.newEventLoopGroup(1, acceptorThreadFactory);
@@ -424,7 +425,12 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
         try {
             // make broker-node unavailable from the cluster
             if (pulsar.getLoadManager() != null) {
-                pulsar.getLoadManager().get().disableBroker();
+                try {
+                    pulsar.getLoadManager().get().disableBroker();
+                } catch (PulsarServerException.NotFoundException ne) {
+                    log.warn("Broker load-manager znode doesn't exist ", ne);
+                    // still continue and release bundle ownership as broker's registration node doesn't exist.
+                }
             }
 
             // unload all namespace-bundles gracefully
@@ -450,11 +456,11 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
     }
 
     public CompletableFuture<Optional<Topic>> getTopicIfExists(final String topic) {
-        return getTopic(topic, false /* createIfMissing */ );
+        return getTopic(topic, false /* createIfMissing */);
     }
 
     public CompletableFuture<Topic> getOrCreateTopic(final String topic) {
-        return getTopic(topic, true /* createIfMissing */ ).thenApply(Optional::get);
+        return getTopic(topic, true /* createIfMissing */).thenApply(Optional::get);
     }
 
     private CompletableFuture<Optional<Topic>> getTopic(final String topic, boolean createIfMissing) {
@@ -471,7 +477,7 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
             }
             final boolean isPersistentTopic = TopicName.get(topic).getDomain().equals(TopicDomain.persistent);
             return topics.computeIfAbsent(topic, (topicName) -> {
-                return isPersistentTopic ? this.loadOrCreatePersistentTopic(topicName, createIfMissing)
+                    return isPersistentTopic ? this.loadOrCreatePersistentTopic(topicName, createIfMissing)
                         : createNonPersistentTopic(topicName);
             });
         } catch (IllegalArgumentException e) {
@@ -548,7 +554,7 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
                     clientBuilder.authentication(pulsar.getConfiguration().getBrokerClientAuthenticationPlugin(),
                             pulsar.getConfiguration().getBrokerClientAuthenticationParameters());
                 }
-                if (pulsar.getConfiguration().isReplicationTlsEnabled()) {
+                if (pulsar.getConfiguration().isBrokerClientTlsEnabled()) {
                     clientBuilder
                             .serviceUrl(isNotBlank(data.getBrokerServiceUrlTls()) ? data.getBrokerServiceUrlTls()
                                     : data.getServiceUrlTls())
@@ -577,7 +583,8 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
      * @return CompletableFuture<Topic>
      * @throws RuntimeException
      */
-    protected CompletableFuture<Optional<Topic>> loadOrCreatePersistentTopic(final String topic, boolean createIfMissing) throws RuntimeException {
+    protected CompletableFuture<Optional<Topic>> loadOrCreatePersistentTopic(final String topic,
+            boolean createIfMissing) throws RuntimeException {
         checkTopicNsOwnership(topic);
 
         final CompletableFuture<Optional<Topic>> topicFuture = new CompletableFuture<>();
@@ -732,6 +739,8 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
                     TimeUnit.MINUTES);
             managedLedgerConfig.setMaxSizePerLedgerMb(2048);
 
+            managedLedgerConfig.setMetadataOperationsTimeoutSeconds(
+                    serviceConfig.getManagedLedgerMetadataOperationsTimeoutSeconds());
             managedLedgerConfig.setMetadataEnsembleSize(serviceConfig.getManagedLedgerDefaultEnsembleSize());
             managedLedgerConfig.setMetadataWriteQuorumSize(serviceConfig.getManagedLedgerDefaultWriteQuorum());
             managedLedgerConfig.setMetadataAckQuorumSize(serviceConfig.getManagedLedgerDefaultAckQuorum());
@@ -743,10 +752,14 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
             managedLedgerConfig.setRetentionSizeInMB(retentionPolicies.getRetentionSizeInMB());
 
             managedLedgerConfig.setLedgerOffloader(pulsar.getManagedLedgerOffloader());
-            managedLedgerConfig.setOffloadLedgerDeletionLag(serviceConfig.getManagedLedgerOffloadDeletionLagMs(),
-                                                            TimeUnit.MILLISECONDS);
-
-            policies.ifPresent(p -> managedLedgerConfig.setOffloadAutoTriggerSizeThresholdBytes(p.offload_threshold));
+            policies.ifPresent(p -> {
+                    long lag = serviceConfig.getManagedLedgerOffloadDeletionLagMs();
+                    if (p.offload_deletion_lag_ms != null) {
+                        lag = p.offload_deletion_lag_ms;
+                    }
+                    managedLedgerConfig.setOffloadLedgerDeletionLag(lag, TimeUnit.MILLISECONDS);
+                    managedLedgerConfig.setOffloadAutoTriggerSizeThresholdBytes(p.offload_threshold);
+                });
 
             future.complete(managedLedgerConfig);
         }, (exception) -> future.completeExceptionally(exception)));

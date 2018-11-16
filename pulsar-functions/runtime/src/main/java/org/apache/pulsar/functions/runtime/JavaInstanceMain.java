@@ -23,57 +23,59 @@ import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.converters.StringConverter;
 import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import com.google.protobuf.Empty;
+import com.google.protobuf.util.JsonFormat;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
+import io.prometheus.client.Collector;
+import io.prometheus.client.CollectorRegistry;
+import io.prometheus.client.exporter.HTTPServer;
+import io.prometheus.client.hotspot.BufferPoolsExports;
+import io.prometheus.client.hotspot.ClassLoadingExports;
+import io.prometheus.client.hotspot.DefaultExports;
+import io.prometheus.client.hotspot.GarbageCollectorExports;
+import io.prometheus.client.hotspot.MemoryPoolsExports;
+import io.prometheus.client.hotspot.StandardExports;
+import io.prometheus.client.hotspot.ThreadExports;
+import io.prometheus.client.hotspot.VersionInfoExports;
 import lombok.extern.slf4j.Slf4j;
-
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
-
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.functions.instance.AuthenticationConfig;
 import org.apache.pulsar.functions.instance.InstanceConfig;
-import org.apache.pulsar.functions.proto.Function;
-import org.apache.pulsar.functions.proto.Function.ProcessingGuarantees;
-import org.apache.pulsar.functions.proto.Function.SinkSpec;
-import org.apache.pulsar.functions.proto.Function.SourceSpec;
 import org.apache.pulsar.functions.proto.Function.FunctionDetails;
 import org.apache.pulsar.functions.proto.InstanceCommunication;
 import org.apache.pulsar.functions.proto.InstanceControlGrpc;
+import org.apache.pulsar.functions.secretsprovider.ClearTextSecretsProvider;
+import org.apache.pulsar.functions.secretsprovider.SecretsProvider;
+import org.apache.pulsar.functions.utils.Reflections;
 
+import java.lang.reflect.Type;
+import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.TimerTask;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * A function container implemented using java thread.
  */
 @Slf4j
 public class JavaInstanceMain implements AutoCloseable {
-    @Parameter(names = "--function_classname", description = "Function Class Name\n", required = true)
-    protected String className;
+    @Parameter(names = "--function_details", description = "Function details json\n", required = true)
+    protected String functionDetailsJsonString;
     @Parameter(
             names = "--jar",
             description = "Path to Jar\n",
             listConverter = StringConverter.class)
     protected String jarFile;
-    @Parameter(names = "--name", description = "Function Name\n", required = true)
-    protected String functionName;
-    @Parameter(names = "--tenant", description = "Tenant Name\n", required = true)
-    protected String tenant;
-    @Parameter(names = "--namespace", description = "Namespace Name\n", required = true)
-    protected String namespace;
-    @Parameter(names = "--log_topic", description = "Log Topic")
-    protected String logTopic;
-
-    @Parameter(names = "--processing_guarantees", description = "Processing Guarantees\n", required = true)
-    protected ProcessingGuarantees processingGuarantees;
 
     @Parameter(names = "--instance_id", description = "Instance Id\n", required = true)
-    protected String instanceId;
+    protected int instanceId;
 
     @Parameter(names = "--function_id", description = "Function Id\n", required = true)
     protected String functionId;
@@ -83,81 +85,55 @@ public class JavaInstanceMain implements AutoCloseable {
 
     @Parameter(names = "--pulsar_serviceurl", description = "Pulsar Service Url\n", required = true)
     protected String pulsarServiceUrl;
-    
+
     @Parameter(names = "--client_auth_plugin", description = "Client auth plugin name\n")
     protected String clientAuthenticationPlugin;
-    
+
     @Parameter(names = "--client_auth_params", description = "Client auth param\n")
     protected String clientAuthenticationParameters;
-    
+
     @Parameter(names = "--use_tls", description = "Use tls connection\n")
     protected String useTls = Boolean.FALSE.toString();
-    
+
     @Parameter(names = "--tls_allow_insecure", description = "Allow insecure tls connection\n")
     protected String tlsAllowInsecureConnection = Boolean.TRUE.toString();
-    
+
     @Parameter(names = "--hostname_verification_enabled", description = "Enable hostname verification")
     protected String tlsHostNameVerificationEnabled = Boolean.FALSE.toString();
-    
+
     @Parameter(names = "--tls_trust_cert_path", description = "tls trust cert file path")
     protected String tlsTrustCertFilePath;
-    
+
     @Parameter(names = "--state_storage_serviceurl", description = "State Storage Service Url\n", required= false)
     protected String stateStorageServiceUrl;
 
     @Parameter(names = "--port", description = "Port to listen on\n", required = true)
     protected int port;
 
+    @Parameter(names = "--metrics_port", description = "Port metrics will be exposed on\n", required = true)
+    protected int metrics_port;
+
     @Parameter(names = "--max_buffered_tuples", description = "Maximum number of tuples to buffer\n", required = true)
     protected int maxBufferedTuples;
 
-    @Parameter(names = "--user_config", description = "UserConfig\n")
-    protected String userConfig;
+    @Parameter(names = "--expected_healthcheck_interval", description = "Expected interval in seconds between healtchecks", required = true)
+    protected int expectedHealthCheckInterval;
 
-    @Parameter(names = "--auto_ack", description = "Enable Auto Acking?\n")
-    protected String autoAck = Boolean.TRUE.toString();
+    @Parameter(names = "--secrets_provider", description = "The classname of the secrets provider", required = false)
+    protected String secretsProviderClassName;
 
-    @Parameter(names = "--source_classname", description = "The source classname")
-    protected String sourceClassname;
+    @Parameter(names = "--secrets_provider_config", description = "The config that needs to be passed to secrets provider", required = false)
+    protected String secretsProviderConfig;
 
-    @Parameter(names = "--source_configs", description = "The source configs")
-    protected String sourceConfigs;
-
-    @Parameter(names = "--source_type_classname", description = "The return type of the source", required = true)
-    protected String sourceTypeClassName;
-
-    @Parameter(names = "--source_subscription_type", description = "The source subscription type", required = true)
-    protected String sourceSubscriptionType;
-
-    @Parameter(names = "--source_topics_serde_classname", description = "A map of topics to SerDe for the source")
-    protected String sourceTopicsSerdeClassName;
-    
-    @Parameter(names = "--topics_pattern", description = "TopicsPattern to consume from list of topics under a namespace that match the pattern. [--input] and [--topicsPattern] are mutually exclusive. Add SerDe class name for a pattern in --customSerdeInputs")
-    protected String topicsPattern;
-
-    @Parameter(names = "--source_timeout_ms", description = "Source message timeout in milliseconds")
-    protected Long sourceTimeoutMs;
-
-    @Parameter(names = "--sink_type_classname", description = "The injest type of the sink", required = true)
-    protected String sinkTypeClassName;
-
-    @Parameter(names = "--sink_configs", description = "The sink configs\n")
-    protected String sinkConfigs;
-
-    @Parameter(names = "--sink_classname", description = "The sink classname\n")
-    protected String sinkClassname;
-
-    @Parameter(names = "--sink_topic", description = "The sink Topic Name\n")
-    protected String sinkTopic;
-
-    @Parameter(names = "--sink_serde_classname", description = "Sink SerDe\n")
-    protected String sinkSerdeClassName;
+    @Parameter(names = "--cluster_name", description = "The name of the cluster this instance is running on", required = true)
+    protected String clusterName;
 
     private Server server;
     private RuntimeSpawner runtimeSpawner;
     private ThreadRuntimeFactory containerFactory;
     private Long lastHealthCheckTs = null;
     private ScheduledExecutorService timer;
+    private HTTPServer metricsServer;
 
     public JavaInstanceMain() { }
 
@@ -168,60 +144,45 @@ public class JavaInstanceMain implements AutoCloseable {
         instanceConfig.setFunctionVersion(functionVersion);
         instanceConfig.setInstanceId(instanceId);
         instanceConfig.setMaxBufferedTuples(maxBufferedTuples);
+        instanceConfig.setClusterName(clusterName);
         FunctionDetails.Builder functionDetailsBuilder = FunctionDetails.newBuilder();
-        functionDetailsBuilder.setTenant(tenant);
-        functionDetailsBuilder.setNamespace(namespace);
-        functionDetailsBuilder.setName(functionName);
-        functionDetailsBuilder.setClassName(className);
-
-        if (logTopic != null) {
-            functionDetailsBuilder.setLogTopic(logTopic);
+        if (functionDetailsJsonString.charAt(0) == '\'') {
+            functionDetailsJsonString = functionDetailsJsonString.substring(1);
         }
-        functionDetailsBuilder.setProcessingGuarantees(processingGuarantees);
-        functionDetailsBuilder.setAutoAck(isTrue(autoAck));
-        if (userConfig != null && !userConfig.isEmpty()) {
-            functionDetailsBuilder.setUserConfig(userConfig);
+        if (functionDetailsJsonString.charAt(functionDetailsJsonString.length() - 1) == '\'') {
+            functionDetailsJsonString = functionDetailsJsonString.substring(0, functionDetailsJsonString.length() - 1);
         }
-
-        // Setup source
-        SourceSpec.Builder sourceDetailsBuilder = SourceSpec.newBuilder();
-        if (sourceClassname != null) {
-            sourceDetailsBuilder.setClassName(sourceClassname);
-        }
-        if (sourceConfigs != null && !sourceConfigs.isEmpty()) {;
-            sourceDetailsBuilder.setConfigs(sourceConfigs);
-        }
-        sourceDetailsBuilder.setSubscriptionType(Function.SubscriptionType.valueOf(sourceSubscriptionType));
-        sourceDetailsBuilder.putAllTopicsToSerDeClassName(new Gson().fromJson(sourceTopicsSerdeClassName, Map.class));
-        if (isNotBlank(topicsPattern)) {
-            sourceDetailsBuilder.setTopicsPattern(topicsPattern);
-        }
-        sourceDetailsBuilder.setTypeClassName(sourceTypeClassName);
-        if (sourceTimeoutMs != null) {
-            sourceDetailsBuilder.setTimeoutMs(sourceTimeoutMs);
-        }
-        functionDetailsBuilder.setSource(sourceDetailsBuilder);
-
-        // Setup sink
-        SinkSpec.Builder sinkSpecBuilder = SinkSpec.newBuilder();
-        if (sinkClassname != null) {
-            sinkSpecBuilder.setClassName(sinkClassname);
-        }
-        if (sinkConfigs != null) {
-            sinkSpecBuilder.setConfigs(sinkConfigs);
-        }
-        if (sinkSerdeClassName != null) {
-            sinkSpecBuilder.setSerDeClassName(sinkSerdeClassName);
-        }
-        sinkSpecBuilder.setTypeClassName(sinkTypeClassName);
-        if (sinkTopic != null && !sinkTopic.isEmpty()) {
-            sinkSpecBuilder.setTopic(sinkTopic);
-        }
-        functionDetailsBuilder.setSink(sinkSpecBuilder);
-
+        JsonFormat.parser().merge(functionDetailsJsonString, functionDetailsBuilder);
         FunctionDetails functionDetails = functionDetailsBuilder.build();
         instanceConfig.setFunctionDetails(functionDetails);
         instanceConfig.setPort(port);
+
+        Map<String, String> secretsProviderConfigMap = null;
+        if (!StringUtils.isEmpty(secretsProviderConfig)) {
+            if (secretsProviderConfig.charAt(0) == '\'') {
+                secretsProviderConfig = secretsProviderConfig.substring(1);
+            }
+            if (secretsProviderConfig.charAt(secretsProviderConfig.length() - 1) == '\'') {
+                secretsProviderConfig = secretsProviderConfig.substring(0, secretsProviderConfig.length() - 1);
+            }
+            Type type = new TypeToken<Map<String, String>>() {}.getType();
+            secretsProviderConfigMap = new Gson().fromJson(secretsProviderConfig, type);
+        }
+
+        if (StringUtils.isEmpty(secretsProviderClassName)) {
+            secretsProviderClassName = ClearTextSecretsProvider.class.getName();
+        }
+
+        SecretsProvider secretsProvider;
+        try {
+            secretsProvider = (SecretsProvider) Reflections.createInstance(secretsProviderClassName, ClassLoader.getSystemClassLoader());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        secretsProvider.init(secretsProviderConfigMap);
+
+        // Collector Registry for prometheus metrics
+        CollectorRegistry collectorRegistry = new CollectorRegistry();
 
         containerFactory = new ThreadRuntimeFactory("LocalRunnerThreadGroup", pulsarServiceUrl,
                 stateStorageServiceUrl,
@@ -229,12 +190,14 @@ public class JavaInstanceMain implements AutoCloseable {
                         .clientAuthenticationParameters(clientAuthenticationParameters).useTls(isTrue(useTls))
                         .tlsAllowInsecureConnection(isTrue(tlsAllowInsecureConnection))
                         .tlsHostnameVerificationEnable(isTrue(tlsHostNameVerificationEnabled))
-                        .tlsTrustCertsFilePath(tlsTrustCertFilePath).build());
+                        .tlsTrustCertsFilePath(tlsTrustCertFilePath).build(),
+                secretsProvider, collectorRegistry);
         runtimeSpawner = new RuntimeSpawner(
                 instanceConfig,
                 jarFile,
+                null, // we really dont use this in thread container
                 containerFactory,
-                30000);
+                expectedHealthCheckInterval * 1000);
 
         server = ServerBuilder.forPort(port)
                 .addService(new InstanceControlImpl(runtimeSpawner))
@@ -253,23 +216,30 @@ public class JavaInstanceMain implements AutoCloseable {
                 }
             }
         });
+
         log.info("Starting runtimeSpawner");
         runtimeSpawner.start();
 
-        timer = Executors.newSingleThreadScheduledExecutor();
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                try {
-                    if (System.currentTimeMillis() - lastHealthCheckTs > 90000) {
-                        log.info("Haven't received health check from spawner in a while. Stopping instance...");
-                        close();
+        // starting metrics server
+        log.info("Starting metrics server on port {}", metrics_port);
+        metricsServer = new HTTPServer(new InetSocketAddress(metrics_port), collectorRegistry, true);
+
+        if (expectedHealthCheckInterval > 0) {
+            timer = Executors.newSingleThreadScheduledExecutor();
+            timer.scheduleAtFixedRate(new TimerTask() {
+                @Override
+                public void run() {
+                    try {
+                        if (System.currentTimeMillis() - lastHealthCheckTs > 3 * expectedHealthCheckInterval * 1000) {
+                            log.info("Haven't received health check from spawner in a while. Stopping instance...");
+                            close();
+                        }
+                    } catch (Exception e) {
+                        log.error("Error occurred when checking for latest health check", e);
                     }
-                } catch (Exception e) {
-                    log.error("Error occurred when checking for latest health check", e);
                 }
-            }
-        }, 30000, 30000, TimeUnit.MILLISECONDS);
+            }, expectedHealthCheckInterval * 1000, expectedHealthCheckInterval * 1000, TimeUnit.MILLISECONDS);
+        }
 
         runtimeSpawner.join();
         log.info("RuntimeSpawner quit, shutting down JavaInstance");
@@ -306,6 +276,9 @@ public class JavaInstanceMain implements AutoCloseable {
             if (containerFactory != null) {
                 containerFactory.close();
             }
+            if (metricsServer != null) {
+                metricsServer.stop();
+            }
         } catch (Exception ex) {
             System.err.println(ex);
         }
@@ -323,7 +296,7 @@ public class JavaInstanceMain implements AutoCloseable {
         @Override
         public void getFunctionStatus(Empty request, StreamObserver<InstanceCommunication.FunctionStatus> responseObserver) {
             try {
-                InstanceCommunication.FunctionStatus response = runtimeSpawner.getFunctionStatus().get();
+                InstanceCommunication.FunctionStatus response = runtimeSpawner.getFunctionStatus(runtimeSpawner.getInstanceConfig().getInstanceId()).get();
                 responseObserver.onNext(response);
                 responseObserver.onCompleted();
             } catch (Exception e) {
@@ -370,14 +343,15 @@ public class JavaInstanceMain implements AutoCloseable {
             if (runtime != null) {
                 try {
                     runtime.resetMetrics().get();
+                    responseObserver.onNext(com.google.protobuf.Empty.getDefaultInstance());
                     responseObserver.onCompleted();
                 } catch (InterruptedException | ExecutionException e) {
-                    log.error("Exception in JavaInstance doing getAndResetMetrics", e);
+                    log.error("Exception in JavaInstance doing resetMetrics", e);
                     throw new RuntimeException(e);
                 }
             }
         }
-        
+
         @Override
         public void healthCheck(com.google.protobuf.Empty request,
                                 io.grpc.stub.StreamObserver<org.apache.pulsar.functions.proto.InstanceCommunication.HealthCheckResult> responseObserver) {

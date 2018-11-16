@@ -25,6 +25,7 @@ import static org.mockito.Mockito.verify;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -48,6 +49,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.bookkeeper.mledger.impl.EntryCacheImpl;
@@ -234,6 +236,52 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         log.info("Waiting for message listener to ack all messages");
         assertEquals(latch.await(numMessages, TimeUnit.SECONDS), true, "Timed out waiting for message listener acks");
         consumer.close();
+        log.info("-- Exiting {} test --", methodName);
+    }
+
+    @Test(timeOut = 100000)
+    public void testPauseAndResume() throws Exception {
+        log.info("-- Starting {} test --", methodName);
+
+        int receiverQueueSize = 20;     // number of permits broker has when consumer initially subscribes
+
+        AtomicReference<CountDownLatch> latch = new AtomicReference<>(new CountDownLatch(receiverQueueSize));
+        AtomicInteger received = new AtomicInteger();
+
+        Consumer<byte[]> consumer = pulsarClient.newConsumer().receiverQueueSize(receiverQueueSize)
+                .topic("persistent://my-property/my-ns/my-topic-pr")
+                .subscriptionName("my-subscriber-name").messageListener((c1, msg) -> {
+                    Assert.assertNotNull(msg, "Message cannot be null");
+                    String receivedMessage = new String(msg.getData());
+                    log.debug("Received message [{}] in the listener", receivedMessage);
+                    c1.acknowledgeAsync(msg);
+                    received.incrementAndGet();
+                    latch.get().countDown();
+                }).subscribe();
+
+        Producer<byte[]> producer = pulsarClient.newProducer()
+                .topic("persistent://my-property/my-ns/my-topic-pr").create();
+
+        consumer.pause();
+
+        for (int i = 0; i < receiverQueueSize * 2; i++) producer.send(("my-message-" + i).getBytes());
+
+        log.info("Waiting for message listener to ack " + receiverQueueSize + " messages");
+        assertEquals(latch.get().await(receiverQueueSize, TimeUnit.SECONDS), true, "Timed out waiting for message listener acks");
+
+        log.info("Giving message listener an opportunity to receive messages while paused");
+        Thread.sleep(2000);     // hopefully this is long enough
+        assertEquals(received.intValue(), receiverQueueSize, "Consumer received messages while paused");
+
+        latch.set(new CountDownLatch(receiverQueueSize));
+
+        consumer.resume();
+
+        log.info("Waiting for message listener to ack all messages");
+        assertEquals(latch.get().await(receiverQueueSize, TimeUnit.SECONDS), true, "Timed out waiting for message listener acks");
+
+        consumer.close();
+        producer.close();
         log.info("-- Exiting {} test --", methodName);
     }
 
@@ -2434,7 +2482,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         Producer<byte[]> producer = pulsarClient.newProducer().topic("persistent://my-property/my-ns/myrsa-topic1")
                 .addEncryptionKey(encryptionKeyName).compressionType(CompressionType.LZ4)
                 .cryptoKeyReader(new EncKeyReader()).create();
-        
+
         Consumer<byte[]> consumer = pulsarClient.newConsumer().topicsPattern("persistent://my-property/my-ns/myrsa-topic1")
                 .subscriptionName("my-subscriber-name").cryptoFailureAction(ConsumerCryptoFailureAction.CONSUME)
                 .subscribe();
@@ -2450,7 +2498,7 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         consumer.close();
         log.info("-- Exiting {} test --", methodName);
     }
-    
+
     private String decryptMessage(TopicMessageImpl<byte[]> msg, String encryptionKeyName, CryptoKeyReader reader)
             throws Exception {
         Optional<EncryptionContext> ctx = msg.getEncryptionCtx();
@@ -2624,4 +2672,88 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
+    // Issue 1452: https://github.com/apache/pulsar/issues/1452
+    // reachedEndOfTopic should be called only once if a topic has been terminated before subscription
+    @Test
+    public void testReachedEndOfTopic() throws Exception
+    {
+        String topicName = "persistent://my-property/my-ns/testReachedEndOfTopic";
+        Producer producer = pulsarClient.newProducer()
+            .topic(topicName)
+            .enableBatching(false).create();
+        producer.close();
+
+        admin.topics().terminateTopicAsync(topicName).get();
+
+        CountDownLatch latch = new CountDownLatch(2);
+        Consumer consumer = pulsarClient.newConsumer()
+            .topic(topicName)
+            .subscriptionName("my-subscriber-name")
+            .messageListener(new MessageListener()
+            {
+                @Override
+                public void reachedEndOfTopic(Consumer consumer)
+                {
+                    log.info("called reachedEndOfTopic  {}", methodName);
+                    latch.countDown();
+                }
+
+                @Override
+                public void received(Consumer consumer, Message message)
+                {
+                    // do nothing
+                }
+            })
+            .subscribe();
+
+        assertFalse(latch.await(1, TimeUnit.SECONDS));
+        assertEquals(latch.getCount(), 1);
+        consumer.close();
+    }
+
+    /**
+     * Ack timeout message is redelivered on time.
+     * Related github issue #2584
+     */
+    @Test
+    public void testAckTimeoutRedeliver() throws Exception {
+        log.info("-- Starting {} test --", methodName);
+
+        // create consumer and producer
+        ConsumerImpl<byte[]> consumer = (ConsumerImpl<byte[]>) pulsarClient.newConsumer()
+            .topic("persistent://my-property/my-ns/ack-timeout-topic")
+            .subscriptionName("subscriber-1")
+            .ackTimeout(1, TimeUnit.SECONDS)
+            .subscriptionType(SubscriptionType.Shared)
+            .acknowledgmentGroupTime(0, TimeUnit.SECONDS)
+            .subscribe();
+
+        Producer<byte[]> producer = pulsarClient.newProducer()
+            .topic("persistent://my-property/my-ns/ack-timeout-topic")
+            .enableBatching(false)
+            .messageRoutingMode(MessageRoutingMode.SinglePartition)
+            .create();
+
+        // (1) Produced one Message
+        String content = "my-message-will-ack-timeout";
+        producer.send(content.getBytes());
+
+        // (2) consumer to receive messages, and not ack
+        Message<byte[]> message = consumer.receive();
+
+        // (3) should be re-delivered once ack-timeout.
+        Thread.sleep(1000);
+        message = consumer.receive(200, TimeUnit.MILLISECONDS);
+        assertNotNull(message);
+
+        Thread.sleep(1000);
+        message = consumer.receive(200, TimeUnit.MILLISECONDS);
+        assertNotNull(message);
+
+        assertEquals(content, new String(message.getData()));
+
+        producer.close();
+        consumer.close();
+        log.info("-- Exiting {} test --", methodName);
+    }
 }

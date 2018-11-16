@@ -20,10 +20,12 @@ package org.apache.pulsar.functions.worker;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import lombok.ToString;
 import org.apache.pulsar.common.util.SimpleTextOutputStream;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.InstanceCommunication;
+import org.apache.pulsar.functions.runtime.KubernetesRuntimeFactory;
 import org.apache.pulsar.functions.runtime.Runtime;
 import org.apache.pulsar.functions.runtime.RuntimeSpawner;
 import org.testng.Assert;
@@ -41,9 +43,36 @@ import java.util.regex.Pattern;
 import static com.google.common.base.Preconditions.checkArgument;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 
 public class FunctionStatsGeneratorTest {
+
+    @Test
+    public void testGenerateFunctionStatsWhenWorkerServiceIsNotInitialized() {
+        WorkerService workerService = mock(WorkerService.class);
+        when(workerService.isInitialized()).thenReturn(false);
+        FunctionsStatsGenerator.generate(
+            workerService, "test-cluster", new SimpleTextOutputStream(Unpooled.buffer()));
+        verify(workerService, times(1)).isInitialized();
+        verify(workerService, times(0)).getFunctionRuntimeManager();
+    }
+
+    @Test
+    public void testGenerateFunctionStatsOnK8SRuntimeFactory() {
+        WorkerService workerService = mock(WorkerService.class);
+        when(workerService.isInitialized()).thenReturn(true);
+        FunctionRuntimeManager frm = mock(FunctionRuntimeManager.class);
+        when(frm.getRuntimeFactory()).thenReturn(mock(KubernetesRuntimeFactory.class));
+        when(workerService.getFunctionRuntimeManager()).thenReturn(frm);
+        FunctionsStatsGenerator.generate(
+            workerService, "test-cluster", new SimpleTextOutputStream(Unpooled.buffer()));
+        verify(workerService, times(1)).isInitialized();
+        verify(workerService, times(1)).getFunctionRuntimeManager();
+        verify(frm, times(0)).getFunctionRuntimeInfos();
+    }
 
     @Test
     public void testFunctionsStatsGenerate() {
@@ -53,14 +82,15 @@ public class FunctionStatsGeneratorTest {
         WorkerService workerService = mock(WorkerService.class);
         doReturn(functionRuntimeManager).when(workerService).getFunctionRuntimeManager();
         doReturn(new WorkerConfig()).when(workerService).getWorkerConfig();
+        when(workerService.isInitialized()).thenReturn(true);
 
         CompletableFuture<InstanceCommunication.MetricsData> metricsDataCompletableFuture = new CompletableFuture<>();
         InstanceCommunication.MetricsData metricsData = InstanceCommunication.MetricsData.newBuilder()
                 .putMetrics(
-                        "__total_processed__",
+                        "pulsar_function_processed_total",
                         InstanceCommunication.MetricsData.DataDigest.newBuilder()
                                 .setCount(100.0).setMax(200.0).setSum(300.0).setMin(0.0).build())
-                .putMetrics("__avg_latency_ms__",
+                .putMetrics("pulsar_function_process_latency_ms",
                         InstanceCommunication.MetricsData.DataDigest.newBuilder()
                                 .setCount(10.0).setMax(20.0).setSum(30.0).setMin(0.0).build())
                 .build();
@@ -96,56 +126,57 @@ public class FunctionStatsGeneratorTest {
 
         Assert.assertEquals(metrics.size(), 8);
 
-        Metric m = metrics.get("pulsar_function__total_processed__count");
+        System.out.println("metrics: " + metrics);
+        Metric m = metrics.get("pulsar_function_processed_total_count");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 100.0);
 
-        m = metrics.get("pulsar_function__total_processed__max");
+        m = metrics.get("pulsar_function_processed_total_max");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 200.0);
 
-        m = metrics.get("pulsar_function__total_processed__sum");
+        m = metrics.get("pulsar_function_processed_total_sum");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 300.0);
 
-        m = metrics.get("pulsar_function__total_processed__min");
+        m = metrics.get("pulsar_function_processed_total_min");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 0.0);
 
-        m = metrics.get("pulsar_function__avg_latency_ms__count");
+        m = metrics.get("pulsar_function_process_latency_ms_count");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 10.0);
 
-        m = metrics.get("pulsar_function__avg_latency_ms__max");
+        m = metrics.get("pulsar_function_process_latency_ms_max");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 20.0);
 
-        m = metrics.get("pulsar_function__avg_latency_ms__sum");
+        m = metrics.get("pulsar_function_process_latency_ms_sum");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
         assertEquals(m.tags.get("namespace"), "test-tenant/test-namespace");
         assertEquals(m.value, 30.0);
 
-        m = metrics.get("pulsar_function__avg_latency_ms__min");
+        m = metrics.get("pulsar_function_process_latency_ms_min");
         assertEquals(m.tags.get("cluster"), "default");
         assertEquals(m.tags.get("instanceId"), "0");
         assertEquals(m.tags.get("name"), "func-1");
@@ -168,7 +199,7 @@ public class FunctionStatsGeneratorTest {
         Pattern tagsPattern = Pattern.compile("(\\w+)=\"([^\"]+)\"(,\\s?)?");
 
         Arrays.asList(metrics.split("\n")).forEach(line -> {
-            if (line.isEmpty()) {
+            if (line.isEmpty() || line.startsWith("#")) {
                 return;
             }
             Matcher matcher = pattern.matcher(line);

@@ -110,6 +110,7 @@ public class ClientCnx extends PulsarHandler {
     private volatile int numberOfRejectRequests = 0;
     private final int maxNumberOfRejectedRequestPerConnection;
     private final int rejectedRequestResetTimeSec = 60;
+    private final int protocolVersion;
     private final long operationTimeoutMs;
 
     protected String proxyToTargetBrokerAddress = null;
@@ -123,6 +124,10 @@ public class ClientCnx extends PulsarHandler {
     }
 
     public ClientCnx(ClientConfigurationData conf, EventLoopGroup eventLoopGroup) {
+        this(conf, eventLoopGroup, Commands.getCurrentProtocolVersion());
+    }
+
+    public ClientCnx(ClientConfigurationData conf, EventLoopGroup eventLoopGroup, int protocolVersion) {
         super(conf.getKeepAliveIntervalSeconds(), TimeUnit.SECONDS);
         checkArgument(conf.getMaxLookupRequest() > conf.getConcurrentLookupRequest());
         this.pendingLookupRequestSemaphore = new Semaphore(conf.getConcurrentLookupRequest(), true);
@@ -135,6 +140,7 @@ public class ClientCnx extends PulsarHandler {
         this.state = State.None;
         this.isTlsHostnameVerificationEnable = conf.isTlsHostnameVerificationEnable();
         this.hostnameVerifier = new DefaultHostnameVerifier();
+        this.protocolVersion = protocolVersion;
     }
 
     @Override
@@ -167,8 +173,8 @@ public class ClientCnx extends PulsarHandler {
         if (authentication.getAuthData().hasDataFromCommand()) {
             authData = authentication.getAuthData().getCommandData();
         }
-        return Commands.newConnect(authentication.getAuthMethodName(), authData,
-                getPulsarClientVersion(), proxyToTargetBrokerAddress);
+        return Commands.newConnect(authentication.getAuthMethodName(), authData, this.protocolVersion,
+                getPulsarClientVersion(), proxyToTargetBrokerAddress, null, null, null);
     }
 
     @Override
@@ -243,8 +249,9 @@ public class ClientCnx extends PulsarHandler {
         if (log.isDebugEnabled()) {
             log.debug("{} Connection is ready", ctx.channel());
         }
-        connectionFuture.complete(null);
+        // set remote protocol version to the correct version before we complete the connection future
         remoteEndpointProtocolVersion = connected.getProtocolVersion();
+        connectionFuture.complete(null);
         state = State.Ready;
     }
 
@@ -283,7 +290,7 @@ public class ClientCnx extends PulsarHandler {
         }
         ConsumerImpl<?> consumer = consumers.get(cmdMessage.getConsumerId());
         if (consumer != null) {
-            consumer.messageReceived(cmdMessage.getMessageId(), headersAndPayload, this);
+            consumer.messageReceived(cmdMessage.getMessageId(), cmdMessage.getRedeliveryCount(), headersAndPayload, this);
         }
     }
 
@@ -710,7 +717,7 @@ public class ClientCnx extends PulsarHandler {
      */
     private void checkServerError(ServerError error, String errMsg) {
         if (ServerError.ServiceNotReady.equals(error)) {
-            log.error("{} Close connection becaues received internal-server error {}", ctx.channel(), errMsg);
+            log.error("{} Close connection because received internal-server error {}", ctx.channel(), errMsg);
             ctx.close();
         } else if (ServerError.TooManyRequests.equals(error)) {
             long rejectedRequests = NUMBER_OF_REJECTED_REQUESTS_UPDATER.getAndIncrement(this);
@@ -719,7 +726,7 @@ public class ClientCnx extends PulsarHandler {
                 eventLoopGroup.schedule(() -> NUMBER_OF_REJECTED_REQUESTS_UPDATER.set(ClientCnx.this, 0),
                         rejectedRequestResetTimeSec, TimeUnit.SECONDS);
             } else if (rejectedRequests >= maxNumberOfRejectedRequestPerConnection) {
-                log.error("{} Close connection becaues received {} rejected request in {} seconds ", ctx.channel(),
+                log.error("{} Close connection because received {} rejected request in {} seconds ", ctx.channel(),
                         NUMBER_OF_REJECTED_REQUESTS_UPDATER.get(ClientCnx.this), rejectedRequestResetTimeSec);
                 ctx.close();
             }

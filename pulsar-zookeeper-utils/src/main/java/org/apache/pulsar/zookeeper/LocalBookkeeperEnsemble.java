@@ -39,13 +39,13 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import org.apache.bookkeeper.bookie.BookieException.InvalidCookieException;
 import org.apache.bookkeeper.bookie.storage.ldb.DbLedgerStorage;
 import org.apache.bookkeeper.clients.StorageClientBuilder;
 import org.apache.bookkeeper.clients.admin.StorageAdminClient;
 import org.apache.bookkeeper.clients.config.StorageClientSettings;
-import org.apache.bookkeeper.clients.exceptions.ClientException;
 import org.apache.bookkeeper.clients.exceptions.NamespaceExistsException;
 import org.apache.bookkeeper.clients.exceptions.NamespaceNotFoundException;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
@@ -62,9 +62,9 @@ import org.apache.bookkeeper.stream.storage.api.cluster.ClusterInitializer;
 import org.apache.bookkeeper.stream.storage.impl.cluster.ZkClusterInitializer;
 import org.apache.bookkeeper.util.MathUtils;
 import org.apache.commons.configuration.CompositeConfiguration;
-import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.KeeperException.NoNodeException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.Watcher.Event.KeeperState;
@@ -82,8 +82,25 @@ public class LocalBookkeeperEnsemble {
     int numberOfBookies;
     private boolean clearOldData = false;
 
-    public LocalBookkeeperEnsemble(int numberOfBookies, int zkPort, int bkBasePort) {
-        this(numberOfBookies, zkPort, bkBasePort, null, null, true);
+    private static class BasePortManager implements Supplier<Integer> {
+
+        private int port;
+
+        public BasePortManager(int basePort) {
+            this.port = basePort;
+        }
+
+        @Override
+        public synchronized Integer get() {
+            return port++;
+        }
+    }
+
+    private final Supplier<Integer> portManager;
+
+
+    public LocalBookkeeperEnsemble(int numberOfBookies, int zkPort, Supplier<Integer> portManager) {
+        this(numberOfBookies, zkPort, 4181, null, null, true, null, portManager);
     }
 
     public LocalBookkeeperEnsemble(int numberOfBookies, int zkPort, int bkBasePort, String zkDataDirName,
@@ -104,10 +121,22 @@ public class LocalBookkeeperEnsemble {
                                    String bkDataDirName,
                                    boolean clearOldData,
                                    String advertisedAddress) {
+        this(numberOfBookies, zkPort, 4181, zkDataDirName, bkDataDirName, clearOldData, advertisedAddress,
+                new BasePortManager(bkBasePort));
+    }
+
+    public LocalBookkeeperEnsemble(int numberOfBookies,
+            int zkPort,
+            int streamStoragePort,
+            String zkDataDirName,
+            String bkDataDirName,
+            boolean clearOldData,
+            String advertisedAddress,
+            Supplier<Integer> portManager) {
         this.numberOfBookies = numberOfBookies;
         this.HOSTPORT = "127.0.0.1:" + zkPort;
         this.ZooKeeperDefaultPort = zkPort;
-        this.initialPort = bkBasePort;
+        this.portManager = portManager;
         this.streamStoragePort = streamStoragePort;
         this.zkDataDirName = zkDataDirName;
         this.bkDataDirName = bkDataDirName;
@@ -129,7 +158,6 @@ public class LocalBookkeeperEnsemble {
     String bkDataDirName;
     BookieServer bs[];
     ServerConfiguration bsConfs[];
-    Integer initialPort = 5000;
 
     // Stream/Table Storage
     StreamStorageLifecycleComponent streamStorage;
@@ -155,7 +183,7 @@ public class LocalBookkeeperEnsemble {
         try {
             // Allow all commands on ZK control port
             System.setProperty("zookeeper.4lw.commands.whitelist", "*");
-            zks = new ZooKeeperServer(new FileTxnSnapLogWrapper(zkDataDir, zkDataDir));
+            zks = new ZooKeeperServer(zkDataDir, zkDataDir, ZooKeeperServer.DEFAULT_TICK_TIME);
 
             serverFactory = new NIOServerCnxnFactory();
             serverFactory.configure(new InetSocketAddress(ZooKeeperDefaultPort), maxCC);
@@ -222,14 +250,24 @@ public class LocalBookkeeperEnsemble {
                 cleanDirectory(bkDataDir);
             }
 
+            int bookiePort = portManager.get();
+
+            // Ensure registration Z-nodes are cleared when standalone service is restarted ungracefully
+            String registrationZnode = String.format("/ledgers/available/%s:%d", baseConf.getAdvertisedAddress(), bookiePort);
+            if (zkc.exists(registrationZnode, null) != null) {
+                try {
+                    zkc.delete(registrationZnode, -1);
+                } catch (NoNodeException nne) {
+                    // Ignore if z-node was just expired
+                }
+            }
+
             bsConfs[i] = new ServerConfiguration(baseConf);
             // override settings
-            bsConfs[i].setBookiePort(initialPort + i);
+            bsConfs[i].setBookiePort(bookiePort);
             bsConfs[i].setZkServers("127.0.0.1:" + ZooKeeperDefaultPort);
             bsConfs[i].setJournalDirName(bkDataDir.getPath());
             bsConfs[i].setLedgerDirNames(new String[] { bkDataDir.getPath() });
-            bsConfs[i].setAllowLoopback(true);
-            bsConfs[i].setGcWaitTime(60000);
 
             try {
                 bs[i] = new BookieServer(bsConfs[i], NullStatsLogger.INSTANCE);
@@ -248,7 +286,7 @@ public class LocalBookkeeperEnsemble {
                 bs[i] = new BookieServer(bsConfs[i], NullStatsLogger.INSTANCE);
             }
             bs[i].start();
-            LOG.debug("Local BK[{}] started (port: {}, data_directory: {})", i, initialPort + i,
+            LOG.debug("Local BK[{}] started (port: {}, data_directory: {})", i, bookiePort,
                     bkDataDir.getAbsolutePath());
         }
     }
@@ -323,7 +361,10 @@ public class LocalBookkeeperEnsemble {
         conf.setProperty("dbStorage_rocksDB_writeBufferSizeMB", 1);
         conf.setProperty("dbStorage_rocksDB_blockCacheSize", 1024 * 1024);
         conf.setFlushInterval(60000);
+        conf.setJournalSyncData(false);
         conf.setProperty("journalMaxGroupWaitMSec", 0L);
+        conf.setAllowLoopback(true);
+        conf.setGcWaitTime(60000);
 
         runZookeeper(1000);
         initializeZookeper();
@@ -331,22 +372,13 @@ public class LocalBookkeeperEnsemble {
     }
 
     public void startStandalone() throws Exception {
-        startStandalone(false);
+        startStandalone(new ServerConfiguration(), false);
     }
 
-    public void startStandalone(boolean enableStreamStorage) throws Exception {
+    public void startStandalone(ServerConfiguration conf, boolean enableStreamStorage) throws Exception {
         LOG.debug("Local ZK/BK starting ...");
-        ServerConfiguration conf = new ServerConfiguration();
         conf.setLedgerManagerFactoryClassName("org.apache.bookkeeper.meta.HierarchicalLedgerManagerFactory");
-        conf.setLedgerStorageClass(DbLedgerStorage.class.getName());
-        conf.setProperty("dbStorage_writeCacheMaxSizeMb", 256);
-        conf.setProperty("dbStorage_readAheadCacheMaxSizeMb", 64);
-        conf.setFlushInterval(60000);
-        conf.setProperty("journalMaxGroupWaitMSec", 1L);
         conf.setAdvertisedAddress(advertisedAddress);
-        // use high disk usage thresholds for standalone
-        conf.setDiskUsageWarnThreshold(0.9999f);
-        conf.setDiskUsageThreshold(0.99999f);
 
         runZookeeper(1000);
         initializeZookeper();
